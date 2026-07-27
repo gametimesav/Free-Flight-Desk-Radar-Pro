@@ -63,6 +63,10 @@ struct ScreenPlane {
   float lat;
   float lon;
   float velocityMs;
+  int gsKt;
+  int vertRateFpm;
+  bool onGround;
+  bool emergency;
   float headingDeg;
   unsigned long positionTime;
   float brightness; 
@@ -91,6 +95,17 @@ ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
 RouteCacheEntry routeCache[ROUTE_CACHE_SIZE] = {};
 int routeCacheNext = 0;
+
+struct NetTelemetry {
+  uint32_t openskyOk = 0;
+  uint32_t openskyFail = 0;
+  uint32_t routeCacheHits = 0;
+  uint32_t routeResolved = 0;
+  uint32_t routeNotFound = 0;
+  uint32_t routeTransientFail = 0;
+  unsigned long lastLogMs = 0;
+};
+NetTelemetry netTelemetry;
 
 // Safe cross-core data sharing for radar plane data.
 portMUX_TYPE radarMux = portMUX_INITIALIZER_UNLOCKED; 
@@ -168,6 +183,7 @@ void cacheRouteNotFound(const String& callsign);
 void cacheRouteTransientFailure(const String& callsign);
 bool fetchRouteForCallsign(const String& callsign, String& routeOut);
 void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount);
+void logNetTelemetryMaybe();
 
 TaskHandle_t NetworkTaskHandle = NULL;
 
@@ -188,6 +204,7 @@ void networkLoopTask(void * pvParameters) {
       }
       if (lastApiPoll == 0 || millis() - lastApiPoll >= pollInterval) {
         fetchAndMapFlights(true);
+        logNetTelemetryMaybe();
         lastApiPoll = millis();
       }
     }
@@ -724,6 +741,20 @@ void cacheRouteTransientFailure(const String& callsign) {
   routeCache[index].permanentMiss = false;
 }
 
+void logNetTelemetryMaybe() {
+  if (millis() - netTelemetry.lastLogMs < 60000) {
+    return;
+  }
+  netTelemetry.lastLogMs = millis();
+  Serial.printf("[net] opensky ok=%lu fail=%lu route(cache=%lu resolved=%lu not_found=%lu retry=%lu)\n",
+                netTelemetry.openskyOk,
+                netTelemetry.openskyFail,
+                netTelemetry.routeCacheHits,
+                netTelemetry.routeResolved,
+                netTelemetry.routeNotFound,
+                netTelemetry.routeTransientFail);
+}
+
 bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
   routeOut = "";
   JsonDocument filter;
@@ -755,6 +786,7 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
     if (cacheIndex >= 0) {
       const RouteCacheEntry& entry = routeCache[cacheIndex];
       if (entry.route[0]) {
+        netTelemetry.routeCacheHits++;
         rankedPlanes[i].plane.country = String(entry.route);
         continue;
       }
@@ -770,15 +802,18 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
     budget--;
     String route;
     if (!fetchRouteForCallsign(callsign, route)) {
+      netTelemetry.routeTransientFail++;
       cacheRouteTransientFailure(callsign);
       continue;
     }
 
     if (route.length() == 0) {
+      netTelemetry.routeNotFound++;
       cacheRouteNotFound(callsign);
       continue;
     }
 
+    netTelemetry.routeResolved++;
     cacheRouteFound(callsign, route);
     rankedPlanes[i].plane.country = route;
   }
@@ -792,8 +827,11 @@ void fetchAndMapFlights(bool enableRouteLookups) {
   filter["states"][0][5] = true;   // lon
   filter["states"][0][6] = true;   // lat
   filter["states"][0][7] = true;   // altitude
+  filter["states"][0][8] = true;   // on_ground
   filter["states"][0][9] = true;   // velocity
   filter["states"][0][10] = true;  // heading
+  filter["states"][0][11] = true;  // vertical rate
+  filter["states"][0][14] = true;  // squawk
 
   JsonDocument doc;
   const char* bearer = (apiType == "auth" && accessToken.length() > 0) ? accessToken.c_str() : nullptr;
@@ -804,6 +842,7 @@ void fetchAndMapFlights(bool enableRouteLookups) {
   }
 
   if (gotData) {
+    netTelemetry.openskyOk++;
     pollInterval = (apiType == "auth") ? 11000 : 108000; 
     JsonArray states = doc["states"].as<JsonArray>();
     
@@ -839,11 +878,16 @@ void fetchAndMapFlights(bool enableRouteLookups) {
       String altStr = USE_METRIC ? String((int)alt) + "m" : String((int)(alt * 3.28084)) + "ft";
 
       float velocityMs = plane[9].isNull() ? 0.0 : plane[9].as<float>();
+      int gsKt = (int)lround(velocityMs * 1.94384);
+      int vertRateFpm = plane[11].isNull() ? 0 : (int)lround(plane[11].as<float>() * 196.8504);
+      bool onGround = !plane[8].isNull() && plane[8].as<bool>();
+      String squawk = plane[14].isNull() ? "" : plane[14].as<String>();
+      bool emergency = (squawk == "7500" || squawk == "7600" || squawk == "7700");
       float headingDeg = plane[10].isNull() ? 0.0 : plane[10].as<float>();
       if (headingDeg < 0.0) headingDeg = 0.0;
       if (headingDeg >= 360.0) headingDeg = fmod(headingDeg, 360.0);
 
-      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
+      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, gsKt, vertRateFpm, onGround, emergency, headingDeg, millis(), 1.0, false};
 
       // Keep nearest planes first (esp-gauge style) instead of raw API order.
       int insertPos = rankedCount;
@@ -877,6 +921,8 @@ void fetchAndMapFlights(bool enableRouteLookups) {
     }
     updateTriggered = true;
     portEXIT_CRITICAL(&radarMux);
+  } else {
+    netTelemetry.openskyFail++;
   }
 }
 
