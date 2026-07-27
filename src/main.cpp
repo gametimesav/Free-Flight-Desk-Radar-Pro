@@ -42,6 +42,7 @@ unsigned long tokenExpiryTime = 0;
 int pollInterval = 108000; 
 bool isConfigured = false, needsReboot = false;
 bool captivePortalActive = false;
+bool cfgNetDiagVerbose = false;
 String dynamicWifiOptions = "";
 const byte DNS_PORT = 53;
 
@@ -252,6 +253,7 @@ void setup() {
   preferences.begin("radar-config", true);
   isConfigured = preferences.getBool("configured", false);
   bool forcePortal = preferences.getBool("force_portal", false);
+  cfgNetDiagVerbose = preferences.getBool("net_diag", false);
   preferences.end();
 
   // Handle forced setup portal mode.
@@ -308,6 +310,8 @@ void setup() {
                     "<input type='password' id='op' name='osec' style='flex-grow:1;'>"
                     "<input type='checkbox' onclick='document.getElementById(\"op\").type=this.checked?\"text\":\"password\"' style='margin-left:10px;'> Show"
                     "</div><hr>"
+                    "<label style='display:flex; align-items:center; gap:8px;'><input type='checkbox' name='diag' value='1'"
+                    + String(cfgNetDiagVerbose ? " checked" : "") + "> Enable network diagnostics logs</label><hr>"
                     "<button type='submit' style='background:#0f0;color:#000;font-weight:bold;width:100%;font-size:18px;'>SAVE & REBOOT</button></form></body></html>";
       server.send(200, "text/html", html);
     });
@@ -329,6 +333,7 @@ void setup() {
       } else {
         preferences.putString("api_type", "guest");
       }
+      preferences.putBool("net_diag", server.hasArg("diag"));
       preferences.end();
       server.send(200, "text/html", "<h3>Settings Saved. Rebooting...</h3>");
       needsReboot = true;
@@ -742,6 +747,9 @@ void cacheRouteTransientFailure(const String& callsign) {
 }
 
 void logNetTelemetryMaybe() {
+  if (!cfgNetDiagVerbose) {
+    return;
+  }
   if (millis() - netTelemetry.lastLogMs < 60000) {
     return;
   }
@@ -1077,6 +1085,7 @@ void loadConfiguration() {
   storedClientSecret = preferences.getString("client_secret", ""); //Number obtained from the website opensky
   storedSsid = preferences.getString("ssid", "");
   storedPass = preferences.getString("pass", "");
+  cfgNetDiagVerbose = preferences.getBool("net_diag", false);
   preferences.end();
   
   calculateBoundingBox(radarLat, radarLon, maxRadarRangeKm);
