@@ -164,6 +164,7 @@ void start_ap_mode() {
     String ssid = ap_ssid();
     WiFi.softAP(ssid.c_str(), nullptr);
     log_i("AP mode '%s' on %s", ssid.c_str(), WiFi.softAPIP().toString().c_str());
+    log_i("Open setup at http://%s", WiFi.softAPIP().toString().c_str());
     char l1[40];
     snprintf(l1, sizeof(l1), "AP %s", ssid.c_str());
     ui::update_status(l1, WiFi.softAPIP().toString().c_str());
@@ -180,12 +181,18 @@ void connect_or_ap() {
         start_ap_mode();
     } else {
         ui::update_status("WiFi connected", WiFi.localIP().toString().c_str());
+        log_i("Open setup at http://%s", WiFi.localIP().toString().c_str());
     }
 
     // mDNS works in either mode — but skip if AP, just in case.
-    if (connected && MDNS.begin(s.hostname)) {
-        MDNS.addService("http", "tcp", 80);
-        log_i("mDNS as %s.local", s.hostname);
+    if (connected) {
+        if (MDNS.begin(s.hostname)) {
+            MDNS.addService("http", "tcp", 80);
+            log_i("mDNS as %s.local", s.hostname);
+            log_i("Try http://%s.local", s.hostname);
+        } else {
+            log_w("mDNS start failed; use IP URL instead");
+        }
     }
 
     if (connected) {

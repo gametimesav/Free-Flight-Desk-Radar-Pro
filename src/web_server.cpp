@@ -10,6 +10,7 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
+#include <DNSServer.h>
 #include <WiFi.h>
 #include <time.h>
 #include <stdlib.h>
@@ -19,6 +20,24 @@ namespace {
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+DNSServer dns;
+bool dns_active = false;
+bool ap_mode = false;
+
+constexpr uint16_t DNS_PORT = 53;
+
+const char* kFallbackIndexHtml =
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Sky Gauge Setup</title>"
+    "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
+    "margin:24px;line-height:1.4}code{background:#f3f4f6;padding:2px 6px;"
+    "border-radius:6px}a{color:#0b63ce}</style></head><body>"
+    "<h2>Sky Gauge is online</h2>"
+    "<p>If <code>esp-gauge.local</code> does not resolve, open this device by IP.</p>"
+    "<p>Try <a href='/api/state'>/api/state</a> to verify API connectivity.</p>"
+    "<p>Tip: upload LittleFS web assets to get the full settings UI.</p>"
+    "</body></html>";
 
 // NVS writes are debounced: a brightness-slider drag arrives as dozens of
 // config patches per second, and each save() walks every key. Settings apply
@@ -154,6 +173,14 @@ void on_ws_event(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType typ
 }
 
 void register_routes() {
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (LittleFS.exists("/index.html")) {
+            req->send(LittleFS, "/index.html", "text/html");
+            return;
+        }
+        req->send(200, "text/html", kFallbackIndexHtml);
+    });
+
     // Static files from LittleFS — index.html, app.js, style.css.
     // no-cache: the UI is iterated on and pushed via OTA `uploadfs`; a long
     // max-age leaves browsers running a stale app.js against fresh firmware
@@ -222,6 +249,10 @@ void register_routes() {
     });
 
     server.onNotFound([](AsyncWebServerRequest* req) {
+        if (ap_mode) {
+            req->redirect("/");
+            return;
+        }
         if (req->method() == HTTP_OPTIONS) { req->send(200); return; }
         req->send(404, "text/plain", "Not found");
     });
@@ -230,9 +261,16 @@ void register_routes() {
 }  // namespace
 
 void begin() {
-    if (!LittleFS.begin(false)) {
-        log_e("LittleFS mount failed — did you upload the filesystem image?");
+    if (!LittleFS.begin(true)) {
+        log_e("LittleFS mount failed");
     }
+
+    if (!LittleFS.exists("/index.html")) {
+        log_w("No /index.html in LittleFS; serving fallback setup page");
+    }
+
+    const wifi_mode_t mode = WiFi.getMode();
+    ap_mode = (mode == WIFI_AP || mode == WIFI_AP_STA);
 
     ws.onEvent(on_ws_event);
     server.addHandler(&ws);
@@ -241,9 +279,20 @@ void begin() {
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
     server.begin();
     log_i("HTTP server started on :80");
+
+    if (ap_mode) {
+        dns.setErrorReplyCode(DNSReplyCode::NoError);
+        dns.start(DNS_PORT, "*", WiFi.softAPIP());
+        dns_active = true;
+        log_i("Captive DNS active on %s", WiFi.softAPIP().toString().c_str());
+    }
 }
 
 void loop_tick() {
+    if (dns_active) {
+        dns.processNextRequest();
+    }
+
     ws.cleanupClients();
 
     if (ui_refresh_pending) {

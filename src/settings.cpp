@@ -3,6 +3,7 @@
 #include <type_traits>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <ctype.h>
 
 namespace settings {
 namespace {
@@ -28,6 +29,33 @@ void load_string(const char* key, char* dst, size_t cap) {
     strlcpy(dst, s.c_str(), cap);
 }
 
+void normalize_hostname(char* host, size_t cap) {
+    if (!host || cap < 2) return;
+
+    size_t w = 0;
+    for (size_t r = 0; host[r] != '\0' && w + 1 < cap; ++r) {
+        char c = static_cast<char>(tolower(static_cast<unsigned char>(host[r])));
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+            host[w++] = c;
+        } else if (w > 0 && host[w - 1] != '-') {
+            host[w++] = '-';
+        }
+    }
+    host[w] = '\0';
+
+    while (w > 0 && host[0] == '-') {
+        memmove(host, host + 1, w);
+        --w;
+    }
+    while (w > 0 && host[w - 1] == '-') {
+        host[--w] = '\0';
+    }
+
+    if (w == 0) {
+        strlcpy(host, "esp-gauge", cap);
+    }
+}
+
 }  // namespace
 
 void begin() {
@@ -36,6 +64,7 @@ void begin() {
     load_string("ssid", snap.wifi_ssid, sizeof(snap.wifi_ssid));
     load_string("pwd",  snap.wifi_password, sizeof(snap.wifi_password));
     load_string("host", snap.hostname, sizeof(snap.hostname));
+    normalize_hostname(snap.hostname, sizeof(snap.hostname));
     load_string("tz",   snap.timezone, sizeof(snap.timezone));
 
     uint8_t mode_u8 = static_cast<uint8_t>(snap.mode);
@@ -189,6 +218,13 @@ bool apply_json(JsonVariantConst patch) {
         changed |= maybe_set_str(w["password"], snap.wifi_password, sizeof(snap.wifi_password));
         changed |= maybe_set_str(w["hostname"], snap.hostname,      sizeof(snap.hostname));
         changed |= maybe_set_str(w["tz"],       snap.timezone,      sizeof(snap.timezone));
+        char normalized[sizeof(snap.hostname)];
+        strlcpy(normalized, snap.hostname, sizeof(normalized));
+        normalize_hostname(normalized, sizeof(normalized));
+        if (strncmp(normalized, snap.hostname, sizeof(snap.hostname)) != 0) {
+            strlcpy(snap.hostname, normalized, sizeof(snap.hostname));
+            changed = true;
+        }
     }
 
     return changed;
