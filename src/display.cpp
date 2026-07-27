@@ -16,7 +16,9 @@ public:
     LGFX_ILI9341() {
         {
             auto cfg = _bus.config();
-            cfg.spi_host    = SPI2_HOST;
+            // CYD display is wired on VSPI pins (SCLK 14, MOSI 13, MISO 12).
+            // Keep touch on HSPI to avoid bus-host overlap artifacts.
+            cfg.spi_host    = SPI3_HOST;
             cfg.spi_mode    = 0;
             cfg.freq_write  = board::LCD_SPI_FREQ_HZ;
             cfg.freq_read   = 16'000'000;
