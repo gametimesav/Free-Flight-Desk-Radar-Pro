@@ -16,6 +16,7 @@ https://makerworld.com/en/models/2893782-flightdeskradar-pro#profileId-3233701
 - [Features](#features)
 - [Hardware Requirements](#hardware-requirements)
 - [Software Requirements](#software-requirements)
+- [Build & Flash (PlatformIO)](#build--flash-platformio)
 - [First-Time Setup](#first-time-setup)
   - [WiFi Configuration](#wifi-configuration)
   - [OpenSky API Key](#opensky-api-key)
@@ -71,6 +72,35 @@ https://makerworld.com/en/models/2893782-flightdeskradar-pro#profileId-3233701
 - DeskRadar ProUp firmware (pre-installed)
 - OpenSky Network account *(free — for API key generation)*
 - Compatible mobile or desktop configuration app *(for initial setup)*
+
+---
+
+## Build & Flash (PlatformIO)
+
+This repository includes a PlatformIO setup for ESP32-2432S028R-style boards.
+
+1. Build:
+
+```bash
+pio run
+```
+
+2. Flash (example serial port):
+
+```bash
+pio run -t upload --upload-port /dev/cu.usbserial-1140
+```
+
+3. Monitor serial output:
+
+```bash
+pio device monitor -b 115200
+```
+
+Notes:
+
+- Display and touch pin mapping are defined in `User_Setup.h`.
+- Main firmware source is `src/main.cpp` (ported from the original `.ino` sketch).
 
 ---
 
