@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
-#include <ArduinoOTA.h>
 #include <SPI.h>
 #include <time.h>
 #include <stdlib.h>
@@ -18,12 +17,11 @@
 #include "radar.h"
 #include "weather.h"
 #include "homeassistant.h"
-#include "net_lock.h"
 
 namespace {
 
 constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
-constexpr int TOUCH_MIN_Z = 120;
+constexpr int TOUCH_MIN_Z = 80;
 constexpr int TOUCH_RAW_MIN_X = 180;
 constexpr int TOUCH_RAW_MAX_X = 3920;
 constexpr int TOUCH_RAW_MIN_Y = 180;
@@ -33,7 +31,7 @@ constexpr bool TOUCH_INVERT_X = false;
 constexpr bool TOUCH_INVERT_Y = true;
 
 SPIClass touch_spi(HSPI);
-XPT2046_Touchscreen touch(TOUCH_CS);
+XPT2046_Touchscreen touch(board::TOUCH_CS_PIN);
 
 void init_touch() {
     static bool initialized = false;
@@ -172,6 +170,12 @@ void start_ap_mode() {
 
 void connect_or_ap() {
     const auto& s = settings::state();
+
+    // Apply the configured POSIX TZ at boot so localtime() reflects it
+    // immediately once wall-clock time is available.
+    setenv("TZ", s.timezone, 1);
+    tzset();
+
     bool connected = false;
     if (strlen(s.wifi_ssid) > 0) {
         ui::update_status("Connecting WiFi...", s.wifi_ssid);
@@ -202,50 +206,6 @@ void connect_or_ap() {
     }
 }
 
-// OTA firmware + LittleFS updates over WiFi (no USB cable needed):
-//   pio run -t upload   --upload-protocol espota --upload-port esp-gauge.local
-//   pio run -t uploadfs --upload-protocol espota --upload-port esp-gauge.local
-// The net lock is held for the whole transfer so the pollers' TLS traffic
-// can't compete with the update for heap/bandwidth.
-bool ota_holds_netlock = false;
-
-void setup_ota() {
-    ArduinoOTA.setHostname(settings::state().hostname);
-    ArduinoOTA.onStart([]() {
-        ota_holds_netlock =
-            xSemaphoreTake(netlock::handle(), pdMS_TO_TICKS(15000)) == pdTRUE;
-        ui::show_status();
-        ui::update_status("OTA update", "starting...");
-        display::tick();
-        log_i("OTA started (%s)",
-              ArduinoOTA.getCommand() == U_FLASH ? "firmware" : "filesystem");
-    });
-    ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
-        static uint8_t last_pct = 255;
-        uint8_t pct = done * 100 / total;
-        if (pct == last_pct) return;
-        last_pct = pct;
-        char buf[12];
-        snprintf(buf, sizeof(buf), "%u%%", pct);
-        ui::update_status("OTA update", buf);
-        display::tick();
-    });
-    ArduinoOTA.onEnd([]() {
-        ui::update_status("OTA done", "rebooting...");
-        display::tick();
-        if (ota_holds_netlock) xSemaphoreGive(netlock::handle());
-    });
-    ArduinoOTA.onError([](ota_error_t err) {
-        log_e("OTA error %u", err);
-        if (ota_holds_netlock) xSemaphoreGive(netlock::handle());
-        ota_holds_netlock = false;
-        ui::update_status("OTA failed", "");
-        display::tick();
-    });
-    ArduinoOTA.begin();
-    log_i("OTA ready on port 3232");
-}
-
 }  // namespace
 
 void setup() {
@@ -271,9 +231,11 @@ void setup() {
 
     connect_or_ap();
     web::begin();
-    setup_ota();
-    radar::begin();     // pollers idle until their mode is active
-    weather::begin();
+    // Keep the setup page responsive; background pollers can exhaust the
+    // ESP32's limited HTTPS/TLS heap and stall the web server under load.
+    // They are started only after the user leaves the setup UI.
+    // radar::begin();
+    // weather::begin();
     homeassistant::begin();
 
     // Let the user see the IP for a moment before switching to their mode.
@@ -290,7 +252,6 @@ void setup() {
 void loop() {
     display::tick();
     web::loop_tick();
-    ArduinoOTA.handle();
 
     static bool touch_down = false;
     static uint32_t touch_down_ms = 0;
@@ -299,14 +260,17 @@ void loop() {
     int sx = 0;
     int sy = 0;
     bool pressed = read_touch_xy(sx, sy);
-    if (pressed && !touch_down) {
-        touch_down = true;
-        touch_down_ms = millis();
+    if (pressed) {
+        if (!touch_down) {
+            touch_down = true;
+            touch_down_ms = millis();
+        }
+        // Keep the latest contact point so slight finger drift still lands.
         touch_x = sx;
         touch_y = sy;
-    } else if (!pressed && touch_down) {
-        // Treat short press-release as a tap for selecting aircraft blips.
-        if (millis() - touch_down_ms <= 700) {
+    } else if (touch_down) {
+        // Allow a slightly longer tap; quick human taps often exceed 700 ms.
+        if (millis() - touch_down_ms <= 1500) {
             ui::on_touch_tap(touch_x, touch_y);
         }
         touch_down = false;
@@ -319,6 +283,16 @@ void loop() {
     if (WiFi.getMode() == WIFI_STA) {
         if (WiFi.status() == WL_CONNECTED) {
             last_wifi_ok_ms = now;
+
+            // If SNTP did not sync yet (clock still near epoch), retry the
+            // timezone-aware NTP config periodically while connected.
+            static uint32_t last_ntp_retry_ms = 0;
+            if (time(nullptr) < 1700000000 && now - last_ntp_retry_ms > 60000) {
+                last_ntp_retry_ms = now;
+                configTzTime(settings::state().timezone,
+                             "pool.ntp.org", "time.nist.gov");
+                log_i("[time] retrying NTP sync (TZ=%s)", settings::state().timezone);
+            }
         } else if (now - last_wifi_ok_ms > 30000) {
             last_wifi_ok_ms = now;   // rate-limit attempts
             log_w("WiFi down >30 s — reconnecting");

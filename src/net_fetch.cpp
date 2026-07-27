@@ -86,14 +86,32 @@ bool http_get_json(const char* url, JsonDocument& doc, JsonDocument& filter) {
         return false;
     }
 
-    // Parse directly from the socket stream to avoid allocating a large
-    // response buffer on non-PSRAM targets.
-    WiFiClient* stream = http.getStreamPtr();
-    DeserializationError err = deserializeJson(
-        doc, *stream, DeserializationOption::Filter(filter));
-    http.end();
+    DeserializationError err;
+
+    // Non-PSRAM boards are better off parsing from stream (no large body
+    // buffer allocation). With PSRAM, buffered parse is more robust for
+    // larger APIs that can drop mid-stream.
+    if (psramFound()) {
+        size_t body_len = 0;
+        char* body = read_body(http, body_len);
+        http.end();
+
+        if (!body || body_len == 0) {
+            log_w("[net] empty body from %s", url);
+            return false;
+        }
+
+        err = deserializeJson(
+            doc, body, body_len, DeserializationOption::Filter(filter));
+    } else {
+        WiFiClient* stream = http.getStreamPtr();
+        err = deserializeJson(
+            doc, *stream, DeserializationOption::Filter(filter));
+        http.end();
+    }
+
     if (err) {
-        log_w("[net] JSON parse stream: %s", err.c_str());
+        log_w("[net] JSON parse (%s): %s", url, err.c_str());
         return false;
     }
     return true;

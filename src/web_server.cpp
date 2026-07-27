@@ -14,6 +14,7 @@
 #include <WiFi.h>
 #include <time.h>
 #include <stdlib.h>
+#include <new>
 
 namespace web {
 namespace {
@@ -25,6 +26,19 @@ bool dns_active = false;
 bool ap_mode = false;
 
 constexpr uint16_t DNS_PORT = 53;
+
+bool serve_littlefs_file(AsyncWebServerRequest* req, const char* path,
+                         const char* content_type) {
+    if (!LittleFS.exists(path)) {
+        log_w("[http] missing asset %s", path);
+        req->send(404, "text/plain", "Missing asset");
+        return false;
+    }
+
+    log_i("[http] GET %s -> %s", req->url().c_str(), path);
+    req->send(LittleFS, path, content_type);
+    return true;
+}
 
 const char* kFallbackIndexHtml =
     "<!doctype html><html><head><meta charset='utf-8'>"
@@ -60,6 +74,25 @@ void flush_save() {
 // thread as lv_timer_handler) applies the UI change.
 volatile bool ui_refresh_pending = false;
 
+bool safe_ws_text_all(const String& out, const char* tag) {
+    // Avoid crashes from AsyncWebSocket internal allocations when heap is
+    // tight (seen as std::bad_alloc -> terminate).
+    if (ESP.getFreeHeap() < 45000) {
+        log_w("[ws] drop %s frame (low heap: %u)", tag, (unsigned)ESP.getFreeHeap());
+        return false;
+    }
+    try {
+        ws.textAll(out);
+        return true;
+    } catch (const std::bad_alloc&) {
+        log_e("[ws] OOM broadcasting %s (%u bytes)", tag, (unsigned)out.length());
+        return false;
+    } catch (...) {
+        log_e("[ws] exception broadcasting %s", tag);
+        return false;
+    }
+}
+
 void send_state_to(AsyncWebSocketClient* client) {
     JsonDocument doc;
     doc["type"] = "state";
@@ -68,7 +101,13 @@ void send_state_to(AsyncWebSocketClient* client) {
 
     String out;
     serializeJson(doc, out);
-    client->text(out);
+    try {
+        client->text(out);
+    } catch (const std::bad_alloc&) {
+        log_e("[ws] OOM sending state to client #%u", client->id());
+    } catch (...) {
+        log_e("[ws] exception sending state to client #%u", client->id());
+    }
 }
 
 void broadcast_all_state_inline() {
@@ -79,7 +118,7 @@ void broadcast_all_state_inline() {
 
     String out;
     serializeJson(doc, out);
-    ws.textAll(out);
+    safe_ws_text_all(out, "state");
 }
 
 // Apply a config patch. Brightness-only patches (slider drags) skip the
@@ -89,19 +128,46 @@ void apply_config_patch(JsonVariantConst patch) {
     char old_tz[sizeof(settings::state().timezone)];
     strlcpy(old_tz, settings::state().timezone, sizeof(old_tz));
 
-    if (!settings::apply_json(patch)) return;
+    const bool changed = settings::apply_json(patch);
+    if (!changed) {
+        log_i("[cfg] patch applied with no state changes");
+        return;
+    }
+
+    const JsonVariantConst radar = patch["radar"];
+    if (!radar.isNull()) {
+        const float lat = radar["lat"].as<float>();
+        const float lon = radar["lon"].as<float>();
+        log_i("[cfg] radar patch lat=%.4f lon=%.4f", lat, lon);
+    }
 
     save_pending = true;
     save_request_ms = millis();
     display::set_brightness(settings::state().brightness);
 
+    // Persist location changes immediately so the page can be reloaded
+    // without losing the new coordinates while the debounced save window
+    // is still pending.
+    if (!radar.isNull()) {
+        settings::save();
+    }
+
     // Apply timezone changes immediately so the on-screen clock updates
     // without waiting for a reboot.
     if (strcmp(old_tz, settings::state().timezone) != 0) {
+        // Persist TZ immediately: users often change it and then reboot soon
+        // after; waiting for the generic debounce risks losing the update.
+        save_pending = false;
+        if (!settings::save_timezone_only()) {
+            log_e("[time] failed to persist timezone");
+        }
+        setenv("TZ", settings::state().timezone, 1);
+        tzset();
         if (WiFi.status() == WL_CONNECTED) {
             configTzTime(settings::state().timezone,
                          "pool.ntp.org", "time.nist.gov");
         }
+        log_i("[time] timezone set to %s", settings::state().timezone);
     }
 
     JsonObjectConst o = patch.as<JsonObjectConst>();
@@ -174,20 +240,25 @@ void on_ws_event(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType typ
 
 void register_routes() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        log_i("[http] GET %s", req->url().c_str());
         if (LittleFS.exists("/index.html")) {
-            req->send(LittleFS, "/index.html", "text/html");
+            req->send(LittleFS, "/index.html", "text/html; charset=utf-8");
             return;
         }
-        req->send(200, "text/html", kFallbackIndexHtml);
+        req->send(200, "text/html; charset=utf-8", kFallbackIndexHtml);
     });
 
-    // Static files from LittleFS — index.html, app.js, style.css.
-    // no-cache: the UI is iterated on and pushed via OTA `uploadfs`; a long
-    // max-age leaves browsers running a stale app.js against fresh firmware
-    // (e.g. a new mode's settings card never appears). Files are tiny and on
-    // the LAN — revalidating each load costs nothing.
-    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html")
-          .setCacheControl("no-cache");
+    server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest* req) {
+        serve_littlefs_file(req, "/index.html", "text/html; charset=utf-8");
+    });
+
+    server.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* req) {
+        serve_littlefs_file(req, "/app.js", "application/javascript; charset=utf-8");
+    });
+
+    server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
+        serve_littlefs_file(req, "/style.css", "text/css; charset=utf-8");
+    });
 
     // REST endpoints for the web UI (HTTP fallback to WS-driven flow).
     server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -338,7 +409,7 @@ void loop_tick() {
             }
             String out;
             serializeJson(doc, out);
-            ws.textAll(out);
+            safe_ws_text_all(out, "radar");
         }
     }
 }

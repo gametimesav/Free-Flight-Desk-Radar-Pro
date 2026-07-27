@@ -32,7 +32,7 @@ constexpr lv_color_t COL_TEXT      = LV_COLOR_MAKE(255, 255, 255);
 constexpr lv_color_t COL_DIM_TEXT  = LV_COLOR_MAKE(150, 150, 150);
 // Weather icon colors
 constexpr lv_color_t COL_SUN       = LV_COLOR_MAKE(255, 205, 40);
-constexpr lv_color_t COL_CLOUD     = LV_COLOR_MAKE(176, 188, 200);
+constexpr lv_color_t COL_CLOUD     = LV_COLOR_MAKE(255, 255, 255);
 constexpr lv_color_t COL_RAIN      = LV_COLOR_MAKE(79,  195, 247);
 constexpr lv_color_t COL_SNOW      = LV_COLOR_MAKE(235, 245, 255);
 
@@ -301,7 +301,11 @@ void update_tap_info_panel() {
     lv_obj_align(rd_info_5, LV_ALIGN_TOP_MID, 0, 168);
     char b1[24], b2[24], b3[24], b4[24], b5[24];
     snprintf(b1, sizeof(b1), "%s", a.callsign[0] ? a.callsign : "(unknown)");
-    snprintf(b2, sizeof(b2), "%s", a.route[0] ? a.route : "route n/a");
+    if (a.route[0]) {
+        snprintf(b2, sizeof(b2), "%s", a.route);
+    } else {
+        snprintf(b2, sizeof(b2), "route pending");
+    }
     if (a.on_ground) {
         snprintf(b3, sizeof(b3), "ALT\nGROUND");
         snprintf(b4, sizeof(b4), "SPD\n0kt");
@@ -464,17 +468,21 @@ void build_radar_screen() {
         rd_glow[i] = 110;
     }
 
-    rd_focus1 = lv_label_create(screen_radar);
+    rd_focus1 = lv_label_create(rd_info_box);
     lv_obj_set_style_text_font(rd_focus1, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(rd_focus1, scope_col(), 0);
+    lv_obj_set_width(rd_focus1, INFO_PANEL_W - 8);
+    lv_obj_set_style_text_align(rd_focus1, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(rd_focus1, "");
-    lv_obj_align(rd_focus1, LV_ALIGN_BOTTOM_MID, RADAR_X_OFF, -38);
+    lv_obj_align(rd_focus1, LV_ALIGN_TOP_MID, 0, 190);
 
-    rd_focus2 = lv_label_create(screen_radar);
+    rd_focus2 = lv_label_create(rd_info_box);
     lv_obj_set_style_text_font(rd_focus2, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rd_focus2, COL_DIM_TEXT, 0);
+    lv_obj_set_width(rd_focus2, INFO_PANEL_W - 8);
+    lv_obj_set_style_text_align(rd_focus2, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(rd_focus2, "");
-    lv_obj_align(rd_focus2, LV_ALIGN_BOTTOM_MID, RADAR_X_OFF, -20);
+    lv_obj_align(rd_focus2, LV_ALIGN_TOP_MID, 0, 212);
 
     rd_status = lv_label_create(screen_radar);
     lv_obj_set_style_text_font(rd_status, &lv_font_montserrat_14, 0);
@@ -730,7 +738,6 @@ void radar_place_blips() {
         else lv_obj_add_flag(rd_live, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Bottom readout: focused aircraft
     if (rd_ac_n == 0) {
         set_text_if_changed(rd_focus1, "");
         set_text_if_changed(rd_focus2, "");
@@ -750,7 +757,6 @@ void radar_place_blips() {
     const auto& f = rd_ac[rd_focus_ix];
     char l1[40];
     if (f.emergency)     snprintf(l1, sizeof(l1), LV_SYMBOL_WARNING " %s SQUAWK", f.callsign);
-    else if (f.route[0]) snprintf(l1, sizeof(l1), "%s  %s", f.callsign, f.route);
     else                 snprintf(l1, sizeof(l1), "%s", f.callsign[0] ? f.callsign : "(no callsign)");
     set_text_if_changed(rd_focus1, l1);
     lv_obj_set_style_text_color(rd_focus1, f.emergency ? COL_RED : scope_col(), 0);
@@ -1388,7 +1394,8 @@ void on_touch_tap(int x, int y) {
 
     int best_ix = -1;
     int best_d2 = 999999;
-    constexpr int HIT_R = 18;
+    constexpr int HIT_R = 24;
+    constexpr int FALLBACK_R = 64;
     for (size_t i = 0; i < rd_ac_n; i++) {
         int dx = x - rd_px[i];
         int dy = y - rd_py[i];
@@ -1396,6 +1403,21 @@ void on_touch_tap(int x, int y) {
         if (d2 <= HIT_R * HIT_R && d2 < best_d2) {
             best_d2 = d2;
             best_ix = (int)i;
+        }
+    }
+
+    // If the direct hit-test misses (calibration drift / finger size), pick
+    // the nearest visible aircraft within a wider radius.
+    if (best_ix < 0) {
+        best_d2 = 999999;
+        for (size_t i = 0; i < rd_ac_n; i++) {
+            int dx = x - rd_px[i];
+            int dy = y - rd_py[i];
+            int d2 = dx * dx + dy * dy;
+            if (d2 <= FALLBACK_R * FALLBACK_R && d2 < best_d2) {
+                best_d2 = d2;
+                best_ix = (int)i;
+            }
         }
     }
 

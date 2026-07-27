@@ -71,6 +71,7 @@ struct Snapshot {
 // Lifecycle
 void begin();
 void save();          // flush in-memory state to NVS
+bool save_timezone_only();   // persist only timezone (used for immediate TZ updates)
 void reset_to_defaults();
 
 // Access — returned reference is mutable; call save() to persist.

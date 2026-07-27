@@ -23,6 +23,21 @@ void load_scalar(const char* key, T& out) {
     else if constexpr (std::is_same_v<T, bool>)     out = prefs.getBool(key, out);
 }
 
+bool put_or_remove_string(const char* key, const char* value) {
+    if (value && value[0]) {
+        return prefs.putString(key, value) > 0;
+    }
+    if (prefs.isKey(key)) prefs.remove(key);
+    return true;
+}
+
+void evict_home_tile_keys_one(int i) {
+    char k[8];
+    snprintf(k, sizeof(k), "h%dico", i); if (prefs.isKey(k)) prefs.remove(k);
+    snprintf(k, sizeof(k), "h%dlbl", i); if (prefs.isKey(k)) prefs.remove(k);
+    snprintf(k, sizeof(k), "h%dent", i); if (prefs.isKey(k)) prefs.remove(k);
+}
+
 void load_string(const char* key, char* dst, size_t cap) {
     if (!prefs.isKey(key)) return;
     String s = prefs.getString(key, dst);
@@ -56,6 +71,13 @@ void normalize_hostname(char* host, size_t cap) {
     }
 }
 
+void normalize_timezone(char* tz, size_t cap) {
+    if (!tz || cap < 2) return;
+    if (tz[0] == '\0') {
+        strlcpy(tz, "UTC0", cap);
+    }
+}
+
 }  // namespace
 
 void begin() {
@@ -66,6 +88,7 @@ void begin() {
     load_string("host", snap.hostname, sizeof(snap.hostname));
     normalize_hostname(snap.hostname, sizeof(snap.hostname));
     load_string("tz",   snap.timezone, sizeof(snap.timezone));
+    normalize_timezone(snap.timezone, sizeof(snap.timezone));
 
     uint8_t mode_u8 = static_cast<uint8_t>(snap.mode);
     load_scalar("mode", mode_u8);
@@ -96,10 +119,24 @@ void begin() {
 }
 
 void save() {
-    prefs.putString("ssid", snap.wifi_ssid);
-    prefs.putString("pwd",  snap.wifi_password);
-    prefs.putString("host", snap.hostname);
-    prefs.putString("tz",   snap.timezone);
+    // First reclaim space by removing keys for unconfigured Home tiles.
+    // This keeps critical writes like timezone from failing when NVS is full.
+    for (int i = 0; i < HOME_TILES; i++) {
+        if (snap.home.entity[i][0] != '\0') continue;
+        char k[8];
+        snprintf(k, sizeof(k), "h%dico", i); if (prefs.isKey(k)) prefs.remove(k);
+        snprintf(k, sizeof(k), "h%dlbl", i); if (prefs.isKey(k)) prefs.remove(k);
+        snprintf(k, sizeof(k), "h%dent", i); if (prefs.isKey(k)) prefs.remove(k);
+    }
+
+    if (!put_or_remove_string("ssid", snap.wifi_ssid))
+        log_e("save ssid failed");
+    if (!put_or_remove_string("pwd",  snap.wifi_password))
+        log_e("save password failed");
+    if (!put_or_remove_string("host", snap.hostname))
+        log_e("save hostname failed");
+    if (!put_or_remove_string("tz",   snap.timezone))
+        log_e("save timezone failed");
 
     prefs.putUChar("mode", static_cast<uint8_t>(snap.mode));
     prefs.putUChar("bri",  snap.brightness);
@@ -114,15 +151,38 @@ void save() {
     prefs.putUShort("r_auto", snap.radar.auto_km);
     prefs.putUChar("r_abase", snap.radar.auto_base);
 
-    prefs.putString("h_url", snap.home.url);
-    prefs.putString("h_tok", snap.home.token);
+    if (!put_or_remove_string("h_url", snap.home.url))
+        log_e("save home url failed");
+    if (!put_or_remove_string("h_tok", snap.home.token))
+        log_e("save home token failed");
     prefs.putUShort("h_poll", snap.home.poll_s);
     for (int i = 0; i < HOME_TILES; i++) {
+        if (snap.home.entity[i][0] == '\0') continue;
         char k[8];
-        snprintf(k, sizeof(k), "h%dico", i); prefs.putString(k, snap.home.icon[i]);
-        snprintf(k, sizeof(k), "h%dlbl", i); prefs.putString(k, snap.home.label[i]);
-        snprintf(k, sizeof(k), "h%dent", i); prefs.putString(k, snap.home.entity[i]);
+        // Empty tile fields are removed instead of stored as empty strings to
+        // keep NVS usage in check on small partitions.
+        snprintf(k, sizeof(k), "h%dico", i); if (!put_or_remove_string(k, snap.home.icon[i])) log_e("save %s failed", k);
+        snprintf(k, sizeof(k), "h%dlbl", i); if (!put_or_remove_string(k, snap.home.label[i])) log_e("save %s failed", k);
+        snprintf(k, sizeof(k), "h%dent", i); if (!put_or_remove_string(k, snap.home.entity[i])) log_e("save %s failed", k);
     }
+}
+
+bool save_timezone_only() {
+    char tz_norm[sizeof(snap.timezone)];
+    strlcpy(tz_norm, snap.timezone, sizeof(tz_norm));
+    normalize_timezone(tz_norm, sizeof(tz_norm));
+    if (strncmp(tz_norm, snap.timezone, sizeof(snap.timezone)) != 0) {
+        strlcpy(snap.timezone, tz_norm, sizeof(snap.timezone));
+    }
+
+    if (prefs.putString("tz", snap.timezone) > 0) return true;
+
+    // If NVS is tight, free optional Home-tile keys and retry.
+    for (int i = HOME_TILES - 1; i >= 0; --i) {
+        evict_home_tile_keys_one(i);
+        if (prefs.putString("tz", snap.timezone) > 0) return true;
+    }
+    return false;
 }
 
 void reset_to_defaults() {
@@ -218,6 +278,13 @@ bool apply_json(JsonVariantConst patch) {
         changed |= maybe_set_str(w["password"], snap.wifi_password, sizeof(snap.wifi_password));
         changed |= maybe_set_str(w["hostname"], snap.hostname,      sizeof(snap.hostname));
         changed |= maybe_set_str(w["tz"],       snap.timezone,      sizeof(snap.timezone));
+        char tz_norm[sizeof(snap.timezone)];
+        strlcpy(tz_norm, snap.timezone, sizeof(tz_norm));
+        normalize_timezone(tz_norm, sizeof(tz_norm));
+        if (strncmp(tz_norm, snap.timezone, sizeof(snap.timezone)) != 0) {
+            strlcpy(snap.timezone, tz_norm, sizeof(snap.timezone));
+            changed = true;
+        }
         char normalized[sizeof(snap.hostname)];
         strlcpy(normalized, snap.hostname, sizeof(normalized));
         normalize_hostname(normalized, sizeof(normalized));
