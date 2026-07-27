@@ -58,6 +58,7 @@ struct ScreenPlane {
   String callsign;
   String altStr;
   String country; 
+  String route;
   float lat;
   float lon;
   float velocityMs;
@@ -79,7 +80,7 @@ struct RouteCacheEntry {
 
 const int MAX_PLANES = 20;
 const int ROUTE_CACHE_SIZE = 24;
-const int ROUTE_LOOKUP_BUDGET = 2;
+const int ROUTE_LOOKUP_BUDGET = 4;
 ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
 RouteCacheEntry routeCache[ROUTE_CACHE_SIZE] = {};
@@ -156,7 +157,8 @@ void refreshRadarScreen();
 void saveSquareGridSettings();
 const char* findCachedRoute(const String& callsign);
 void cacheRoute(const String& callsign, const String& route);
-bool fetchRouteForCallsign(const String& callsign, String& routeOut);
+enum class RouteFetchResult : uint8_t { Found, NotFound, Error };
+RouteFetchResult fetchRouteForCallsign(const String& callsign, String& routeOut);
 void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount);
 
 TaskHandle_t NetworkTaskHandle = NULL;
@@ -541,11 +543,13 @@ void drawActivePlanes() {
         } 
         else if (cfgDisplayMode == 1) { 
           tft.drawRightString(currentPlanes[i].callsign, currentPlanes[i].x - 5, currentPlanes[i].y - 7, 1);
-          tft.drawRightString(currentPlanes[i].altStr, currentPlanes[i].x - 5, currentPlanes[i].y + 3, 1);
+          String line2 = currentPlanes[i].route.length() > 0 ? currentPlanes[i].route : currentPlanes[i].altStr;
+          tft.drawRightString(line2, currentPlanes[i].x - 5, currentPlanes[i].y + 3, 1);
         } 
         else if (cfgDisplayMode == 2) { 
           tft.drawRightString(currentPlanes[i].callsign, currentPlanes[i].x - 5, currentPlanes[i].y - 7, 1);
-          tft.drawRightString(currentPlanes[i].altStr + " " + currentPlanes[i].country, currentPlanes[i].x - 5, currentPlanes[i].y + 3, 1);
+          String secondaryMeta = currentPlanes[i].route.length() > 0 ? currentPlanes[i].route : currentPlanes[i].country;
+          tft.drawRightString(currentPlanes[i].altStr + " " + secondaryMeta, currentPlanes[i].x - 5, currentPlanes[i].y + 3, 1);
         }
       } else {
         if (cfgDisplayMode == 0) { 
@@ -553,11 +557,13 @@ void drawActivePlanes() {
         } 
         else if (cfgDisplayMode == 1) { 
           tft.drawString(currentPlanes[i].callsign, currentPlanes[i].x + 5, currentPlanes[i].y - 7, 1);
-          tft.drawString(currentPlanes[i].altStr, currentPlanes[i].x + 5, currentPlanes[i].y + 3, 1);
+          String line2 = currentPlanes[i].route.length() > 0 ? currentPlanes[i].route : currentPlanes[i].altStr;
+          tft.drawString(line2, currentPlanes[i].x + 5, currentPlanes[i].y + 3, 1);
         } 
         else if (cfgDisplayMode == 2) { 
           tft.drawString(currentPlanes[i].callsign, currentPlanes[i].x + 5, currentPlanes[i].y - 7, 1);
-          tft.drawString(currentPlanes[i].altStr + " " + currentPlanes[i].country, currentPlanes[i].x + 5, currentPlanes[i].y + 3, 1);
+          String secondaryMeta = currentPlanes[i].route.length() > 0 ? currentPlanes[i].route : currentPlanes[i].country;
+          tft.drawString(currentPlanes[i].altStr + " " + secondaryMeta, currentPlanes[i].x + 5, currentPlanes[i].y + 3, 1);
         }
       }
     }
@@ -659,19 +665,23 @@ void cacheRoute(const String& callsign, const String& route) {
   routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
 }
 
-bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
+RouteFetchResult fetchRouteForCallsign(const String& callsign, String& routeOut) {
   routeOut = "";
   HTTPClient routeHttp;
   routeHttp.setConnectTimeout(3000);
   routeHttp.setTimeout(5000);
   if (!routeHttp.begin("https://api.adsbdb.com/v0/callsign/" + callsign)) {
-    return false;
+    return RouteFetchResult::Error;
   }
 
   int code = routeHttp.GET();
+  if (code == 404) {
+    routeHttp.end();
+    return RouteFetchResult::NotFound;
+  }
   if (code != 200) {
     routeHttp.end();
-    return false;
+    return RouteFetchResult::Error;
   }
 
   JsonDocument filter;
@@ -682,15 +692,16 @@ bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
   DeserializationError err = deserializeJson(doc, routeHttp.getString(), DeserializationOption::Filter(filter));
   routeHttp.end();
   if (err) {
-    return false;
+    return RouteFetchResult::Error;
   }
 
   const char* from = doc["response"]["flightroute"]["origin"]["iata_code"] | "";
   const char* to = doc["response"]["flightroute"]["destination"]["iata_code"] | "";
   if (from[0] && to[0]) {
     routeOut = String(from) + ">" + String(to);
+    return RouteFetchResult::Found;
   }
-  return true;
+  return RouteFetchResult::NotFound;
 }
 
 void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
@@ -704,7 +715,7 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
     const char* cached = findCachedRoute(callsign);
     if (cached != nullptr) {
       if (cached[0]) {
-        rankedPlanes[i].plane.country = String(cached);
+        rankedPlanes[i].plane.route = String(cached);
       }
       continue;
     }
@@ -715,15 +726,19 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
 
     budget--;
     String route;
-    if (!fetchRouteForCallsign(callsign, route)) {
-      // Cache misses as empty to avoid hammering lookups every poll.
+    RouteFetchResult fetchResult = fetchRouteForCallsign(callsign, route);
+    if (fetchResult == RouteFetchResult::Error) {
+      continue;
+    }
+    if (fetchResult == RouteFetchResult::NotFound) {
+      // Cache only permanent misses so transient network failures can retry later.
       cacheRoute(callsign, "");
       continue;
     }
 
     cacheRoute(callsign, route);
     if (route.length() > 0) {
-      rankedPlanes[i].plane.country = route;
+      rankedPlanes[i].plane.route = route;
     }
   }
 }
@@ -776,7 +791,7 @@ void fetchAndMapFlights() {
       if (headingDeg < 0.0) headingDeg = 0.0;
       if (headingDeg >= 360.0) headingDeg = fmod(headingDeg, 360.0);
 
-      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
+      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, "", lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
 
       // Keep nearest planes first (esp-gauge style) instead of raw API order.
       int insertPos = rankedCount;
