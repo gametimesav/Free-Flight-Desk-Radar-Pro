@@ -2,7 +2,6 @@
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <WebServer.h>
-#include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h> 
@@ -11,6 +10,8 @@
 #include <Preferences.h>
 
 #include "net_fetch.h"
+#include "radar_data.h"
+#include "radar_model.h"
 
 // --- Settings & Security ---
 const bool USE_METRIC = true;
@@ -53,59 +54,8 @@ unsigned long lastSweepUpdate = 0;
 unsigned long lastBlinkUpdate = 0;
 unsigned long lastPlaneMotionUpdate = 0;
 
-struct ScreenPlane {
-  int x;
-  int y;
-  int lastX;
-  int lastY; 
-  String callsign;
-  String altStr;
-  String country; 
-  float lat;
-  float lon;
-  float velocityMs;
-  int gsKt;
-  int vertRateFpm;
-  bool onGround;
-  bool emergency;
-  float headingDeg;
-  unsigned long positionTime;
-  float brightness; 
-  bool soundTriggered;
-};
-
-struct RankedPlane {
-  ScreenPlane plane;
-  float distKm;
-};
-
-struct RouteCacheEntry {
-  char callsign[12];
-  char route[16];
-  uint8_t failCount;
-  uint32_t retryAtMs;
-  bool permanentMiss;
-};
-
-const int MAX_PLANES = 20;
-const int ROUTE_CACHE_SIZE = 24;
-const int ROUTE_LOOKUP_BUDGET = 2;
-const uint32_t ROUTE_RETRY_BASE_MS = 30000;
-const uint32_t ROUTE_RETRY_MAX_MS = 600000;
 ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
-RouteCacheEntry routeCache[ROUTE_CACHE_SIZE] = {};
-int routeCacheNext = 0;
-
-struct NetTelemetry {
-  uint32_t openskyOk = 0;
-  uint32_t openskyFail = 0;
-  uint32_t routeCacheHits = 0;
-  uint32_t routeResolved = 0;
-  uint32_t routeNotFound = 0;
-  uint32_t routeTransientFail = 0;
-  unsigned long lastLogMs = 0;
-};
 NetTelemetry netTelemetry;
 
 // Safe cross-core data sharing for radar plane data.
@@ -177,13 +127,6 @@ void drawPlaneIcon(int x, int y, float headingDeg, uint16_t color);
 void drawMainGridControls();
 void refreshRadarScreen();
 void saveSquareGridSettings();
-int findRouteCacheIndex(const String& callsign);
-bool routeCacheRetryDue(const RouteCacheEntry& entry);
-void cacheRouteFound(const String& callsign, const String& route);
-void cacheRouteNotFound(const String& callsign);
-void cacheRouteTransientFailure(const String& callsign);
-bool fetchRouteForCallsign(const String& callsign, String& routeOut);
-void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount);
 void logNetTelemetryMaybe();
 
 TaskHandle_t NetworkTaskHandle = NULL;
@@ -674,78 +617,6 @@ void saveSquareGridSettings() {
   preferences.end();
 }
 
-int findRouteCacheIndex(const String& callsign) {
-  for (int i = 0; i < ROUTE_CACHE_SIZE; i++) {
-    if (routeCache[i].callsign[0] && callsign.equals(routeCache[i].callsign)) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-bool routeCacheRetryDue(const RouteCacheEntry& entry) {
-  if (entry.retryAtMs == 0) {
-    return true;
-  }
-  return (int32_t)(millis() - entry.retryAtMs) >= 0;
-}
-
-void cacheRouteFound(const String& callsign, const String& route) {
-  if (callsign.length() == 0 || callsign == "UNK") {
-    return;
-  }
-  int index = findRouteCacheIndex(callsign);
-  if (index < 0) {
-    index = routeCacheNext;
-    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
-  }
-  strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
-  strlcpy(routeCache[index].route, route.c_str(), sizeof(routeCache[index].route));
-  routeCache[index].failCount = 0;
-  routeCache[index].retryAtMs = 0;
-  routeCache[index].permanentMiss = false;
-}
-
-void cacheRouteNotFound(const String& callsign) {
-  if (callsign.length() == 0 || callsign == "UNK") {
-    return;
-  }
-  int index = findRouteCacheIndex(callsign);
-  if (index < 0) {
-    index = routeCacheNext;
-    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
-  }
-  strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
-  routeCache[index].route[0] = '\0';
-  routeCache[index].failCount = 0;
-  routeCache[index].retryAtMs = 0;
-  routeCache[index].permanentMiss = true;
-}
-
-void cacheRouteTransientFailure(const String& callsign) {
-  if (callsign.length() == 0 || callsign == "UNK") {
-    return;
-  }
-  int index = findRouteCacheIndex(callsign);
-  if (index < 0) {
-    index = routeCacheNext;
-    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
-    strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
-    routeCache[index].route[0] = '\0';
-    routeCache[index].failCount = 0;
-  }
-
-  if (routeCache[index].failCount < 7) {
-    routeCache[index].failCount++;
-  }
-  uint32_t retryDelayMs = ROUTE_RETRY_BASE_MS << routeCache[index].failCount;
-  if (retryDelayMs > ROUTE_RETRY_MAX_MS) {
-    retryDelayMs = ROUTE_RETRY_MAX_MS;
-  }
-  routeCache[index].retryAtMs = millis() + retryDelayMs;
-  routeCache[index].permanentMiss = false;
-}
-
 void logNetTelemetryMaybe() {
   if (!cfgNetDiagVerbose) {
     return;
@@ -761,70 +632,6 @@ void logNetTelemetryMaybe() {
                 netTelemetry.routeResolved,
                 netTelemetry.routeNotFound,
                 netTelemetry.routeTransientFail);
-}
-
-bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
-  routeOut = "";
-  JsonDocument filter;
-  filter["response"]["flightroute"]["origin"]["iata_code"] = true;
-  filter["response"]["flightroute"]["destination"]["iata_code"] = true;
-
-  JsonDocument doc;
-  if (!net::http_get_json("https://api.adsbdb.com/v0/callsign/" + callsign, doc, &filter)) {
-    return false;
-  }
-
-  const char* from = doc["response"]["flightroute"]["origin"]["iata_code"] | "";
-  const char* to = doc["response"]["flightroute"]["destination"]["iata_code"] | "";
-  if (from[0] && to[0]) {
-    routeOut = String(from) + ">" + String(to);
-  }
-  return true;
-}
-
-void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
-  int budget = ROUTE_LOOKUP_BUDGET;
-  for (int i = 0; i < rankedCount; i++) {
-    String callsign = rankedPlanes[i].plane.callsign;
-    if (callsign.length() == 0 || callsign == "UNK") {
-      continue;
-    }
-
-    int cacheIndex = findRouteCacheIndex(callsign);
-    if (cacheIndex >= 0) {
-      const RouteCacheEntry& entry = routeCache[cacheIndex];
-      if (entry.route[0]) {
-        netTelemetry.routeCacheHits++;
-        rankedPlanes[i].plane.country = String(entry.route);
-        continue;
-      }
-      if (entry.permanentMiss || !routeCacheRetryDue(entry)) {
-        continue;
-      }
-    }
-
-    if (budget <= 0) {
-      continue;
-    }
-
-    budget--;
-    String route;
-    if (!fetchRouteForCallsign(callsign, route)) {
-      netTelemetry.routeTransientFail++;
-      cacheRouteTransientFailure(callsign);
-      continue;
-    }
-
-    if (route.length() == 0) {
-      netTelemetry.routeNotFound++;
-      cacheRouteNotFound(callsign);
-      continue;
-    }
-
-    netTelemetry.routeResolved++;
-    cacheRouteFound(callsign, route);
-    rankedPlanes[i].plane.country = route;
-  }
 }
 
 void fetchAndMapFlights(bool enableRouteLookups) {
@@ -854,72 +661,14 @@ void fetchAndMapFlights(bool enableRouteLookups) {
     pollInterval = (apiType == "auth") ? 11000 : 108000; 
     JsonArray states = doc["states"].as<JsonArray>();
     
-    int rankedCount = 0;
     RankedPlane rankedPlanes[MAX_PLANES];
-
-    for (JsonArray plane : states) {
-      if (plane[5].isNull() || plane[6].isNull()) continue;
-
-      float lat = plane[6].as<float>();
-      float lon = plane[5].as<float>();
-      
-      float dY = (lat - radarLat) * 111.1;
-      float dX = (lon - radarLon) * 111.1 * cos(radarLat * PI / 180.0);
-      float distKm = sqrt(dX*dX + dY*dY);
-      if (distKm > maxRadarRangeKm) continue;
-      
-      int x = 120 + (distKm/maxRadarRangeKm * 100.0) * sin(atan2(dX, dY));
-      int y = 120 - (distKm/maxRadarRangeKm * 100.0) * cos(atan2(dX, dY));
-      
-      String callsign = plane[1].as<String>();
-      callsign.trim();
-      if(callsign == "" || callsign == "null") callsign = "UNK";
-
-      String country = plane[2].as<String>();
-      if(country == "null" || country == "") country = "UNK";
-      if(country == "United States") country = "USA";
-      if(country == "United Kingdom") country = "UK";
-      if(country == "Russian Federation") country = "Russia";
-      if(country.length() > 8) country = country.substring(0, 8); 
-
-      float alt = plane[7].as<float>();
-      String altStr = USE_METRIC ? String((int)alt) + "m" : String((int)(alt * 3.28084)) + "ft";
-
-      float velocityMs = plane[9].isNull() ? 0.0 : plane[9].as<float>();
-      int gsKt = (int)lround(velocityMs * 1.94384);
-      int vertRateFpm = plane[11].isNull() ? 0 : (int)lround(plane[11].as<float>() * 196.8504);
-      bool onGround = !plane[8].isNull() && plane[8].as<bool>();
-      String squawk = plane[14].isNull() ? "" : plane[14].as<String>();
-      bool emergency = (squawk == "7500" || squawk == "7600" || squawk == "7700");
-      float headingDeg = plane[10].isNull() ? 0.0 : plane[10].as<float>();
-      if (headingDeg < 0.0) headingDeg = 0.0;
-      if (headingDeg >= 360.0) headingDeg = fmod(headingDeg, 360.0);
-
-      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, gsKt, vertRateFpm, onGround, emergency, headingDeg, millis(), 1.0, false};
-
-      // Keep nearest planes first (esp-gauge style) instead of raw API order.
-      int insertPos = rankedCount;
-      while (insertPos > 0 && rankedPlanes[insertPos - 1].distKm > distKm) {
-        insertPos--;
-      }
-
-      if (insertPos >= cfgMaxPlanesShown) {
-        continue;
-      }
-
-      int lastIndex = (rankedCount < cfgMaxPlanesShown) ? rankedCount : (cfgMaxPlanesShown - 1);
-      for (int i = lastIndex; i > insertPos; i--) {
-        rankedPlanes[i] = rankedPlanes[i - 1];
-      }
-
-      rankedPlanes[insertPos] = {mapped, distKm};
-      if (rankedCount < cfgMaxPlanesShown) {
-        rankedCount++;
-      }
-    }
+    int rankedCount = 0;
+    radar_data::parseOpenSkyStates(states, radarLat, radarLon, maxRadarRangeKm,
+                                   cfgMaxPlanesShown, USE_METRIC,
+                                   rankedPlanes, rankedCount);
 
     if (enableRouteLookups) {
-      resolveRoutesForRankedPlanes(rankedPlanes, rankedCount);
+      radar_data::resolveRoutesForRankedPlanes(rankedPlanes, rankedCount, netTelemetry);
     }
     
     portENTER_CRITICAL(&radarMux);
