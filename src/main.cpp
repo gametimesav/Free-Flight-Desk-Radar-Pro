@@ -66,9 +66,24 @@ struct ScreenPlane {
   float brightness; 
   bool soundTriggered;
 };
+
+struct RankedPlane {
+  ScreenPlane plane;
+  float distKm;
+};
+
+struct RouteCacheEntry {
+  char callsign[12];
+  char route[16];
+};
+
 const int MAX_PLANES = 20;
+const int ROUTE_CACHE_SIZE = 24;
+const int ROUTE_LOOKUP_BUDGET = 2;
 ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
+RouteCacheEntry routeCache[ROUTE_CACHE_SIZE] = {};
+int routeCacheNext = 0;
 
 // Safe cross-core data sharing for radar plane data.
 portMUX_TYPE radarMux = portMUX_INITIALIZER_UNLOCKED; 
@@ -139,6 +154,10 @@ void drawPlaneIcon(int x, int y, float headingDeg, uint16_t color);
 void drawMainGridControls();
 void refreshRadarScreen();
 void saveSquareGridSettings();
+const char* findCachedRoute(const String& callsign);
+void cacheRoute(const String& callsign, const String& route);
+bool fetchRouteForCallsign(const String& callsign, String& routeOut);
+void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount);
 
 TaskHandle_t NetworkTaskHandle = NULL;
 
@@ -622,6 +641,93 @@ void saveSquareGridSettings() {
   preferences.end();
 }
 
+const char* findCachedRoute(const String& callsign) {
+  for (int i = 0; i < ROUTE_CACHE_SIZE; i++) {
+    if (routeCache[i].callsign[0] && callsign.equals(routeCache[i].callsign)) {
+      return routeCache[i].route;
+    }
+  }
+  return nullptr;
+}
+
+void cacheRoute(const String& callsign, const String& route) {
+  if (callsign.length() == 0 || callsign == "UNK") {
+    return;
+  }
+  strlcpy(routeCache[routeCacheNext].callsign, callsign.c_str(), sizeof(routeCache[routeCacheNext].callsign));
+  strlcpy(routeCache[routeCacheNext].route, route.c_str(), sizeof(routeCache[routeCacheNext].route));
+  routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
+}
+
+bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
+  routeOut = "";
+  HTTPClient routeHttp;
+  routeHttp.setConnectTimeout(3000);
+  routeHttp.setTimeout(5000);
+  if (!routeHttp.begin("https://api.adsbdb.com/v0/callsign/" + callsign)) {
+    return false;
+  }
+
+  int code = routeHttp.GET();
+  if (code != 200) {
+    routeHttp.end();
+    return false;
+  }
+
+  JsonDocument filter;
+  filter["response"]["flightroute"]["origin"]["iata_code"] = true;
+  filter["response"]["flightroute"]["destination"]["iata_code"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, routeHttp.getString(), DeserializationOption::Filter(filter));
+  routeHttp.end();
+  if (err) {
+    return false;
+  }
+
+  const char* from = doc["response"]["flightroute"]["origin"]["iata_code"] | "";
+  const char* to = doc["response"]["flightroute"]["destination"]["iata_code"] | "";
+  if (from[0] && to[0]) {
+    routeOut = String(from) + ">" + String(to);
+  }
+  return true;
+}
+
+void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
+  int budget = ROUTE_LOOKUP_BUDGET;
+  for (int i = 0; i < rankedCount; i++) {
+    String callsign = rankedPlanes[i].plane.callsign;
+    if (callsign.length() == 0 || callsign == "UNK") {
+      continue;
+    }
+
+    const char* cached = findCachedRoute(callsign);
+    if (cached != nullptr) {
+      if (cached[0]) {
+        rankedPlanes[i].plane.country = String(cached);
+      }
+      continue;
+    }
+
+    if (budget <= 0) {
+      continue;
+    }
+
+    budget--;
+    String route;
+    if (!fetchRouteForCallsign(callsign, route)) {
+      // Cache misses as empty to avoid hammering lookups every poll.
+      cacheRoute(callsign, "");
+      continue;
+    }
+
+    cacheRoute(callsign, route);
+    if (route.length() > 0) {
+      rankedPlanes[i].plane.country = route;
+    }
+  }
+}
+
 void fetchAndMapFlights() {
   HTTPClient http;
   http.begin("https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax);
@@ -634,11 +740,6 @@ void fetchAndMapFlights() {
     deserializeJson(doc, http.getString());
     JsonArray states = doc["states"].as<JsonArray>();
     
-    struct RankedPlane {
-      ScreenPlane plane;
-      float distKm;
-    };
-
     int rankedCount = 0;
     RankedPlane rankedPlanes[MAX_PLANES];
 
@@ -697,6 +798,8 @@ void fetchAndMapFlights() {
         rankedCount++;
       }
     }
+
+    resolveRoutesForRankedPlanes(rankedPlanes, rankedCount);
     
     portENTER_CRITICAL(&radarMux);
     sharedPlaneCount = rankedCount;
