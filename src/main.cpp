@@ -10,6 +10,8 @@
 #include <cmath>
 #include <Preferences.h>
 
+#include "net_fetch.h"
+
 // --- Settings & Security ---
 const bool USE_METRIC = true;
 const int SETTINGS_BUTTON_PIN = 0; 
@@ -662,27 +664,12 @@ void cacheRoute(const String& callsign, const String& route) {
 
 bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
   routeOut = "";
-  HTTPClient routeHttp;
-  routeHttp.setConnectTimeout(3000);
-  routeHttp.setTimeout(5000);
-  if (!routeHttp.begin("https://api.adsbdb.com/v0/callsign/" + callsign)) {
-    return false;
-  }
-
-  int code = routeHttp.GET();
-  if (code != 200) {
-    routeHttp.end();
-    return false;
-  }
-
   JsonDocument filter;
   filter["response"]["flightroute"]["origin"]["iata_code"] = true;
   filter["response"]["flightroute"]["destination"]["iata_code"] = true;
 
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, routeHttp.getString(), DeserializationOption::Filter(filter));
-  routeHttp.end();
-  if (err) {
+  if (!net::http_get_json("https://api.adsbdb.com/v0/callsign/" + callsign, doc, &filter)) {
     return false;
   }
 
@@ -730,15 +717,11 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
 }
 
 void fetchAndMapFlights(bool enableRouteLookups) {
-  HTTPClient http;
-  http.begin("https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax);
-  if (apiType == "auth") http.addHeader("Authorization", "Bearer " + accessToken);
-  
-  int httpCode = http.GET();
-  if (httpCode == 200) {
+  String url = "https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax;
+  JsonDocument doc;
+  const char* bearer = (apiType == "auth" && accessToken.length() > 0) ? accessToken.c_str() : nullptr;
+  if (net::http_get_json(url, doc, nullptr, bearer)) {
     pollInterval = (apiType == "auth") ? 11000 : 108000; 
-    JsonDocument doc;
-    deserializeJson(doc, http.getString());
     JsonArray states = doc["states"].as<JsonArray>();
     
     int rankedCount = 0;
@@ -812,7 +795,6 @@ void fetchAndMapFlights(bool enableRouteLookups) {
     updateTriggered = true;
     portEXIT_CRITICAL(&radarMux);
   }
-  http.end();
 }
 
 void drawSettingsUI() {
@@ -980,12 +962,9 @@ void calculateBoundingBox(float lat, float lon, float rangeKm) {
 }
 
 bool refreshOpenSkyToken() {
-  HTTPClient http;
-  http.begin("https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token");
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  if (http.POST("grant_type=client_credentials&client_id=" + storedClientId + "&client_secret=" + storedClientSecret) == 200) {
-    JsonDocument doc;
-    deserializeJson(doc, http.getString());
+  JsonDocument doc;
+  String form = "grant_type=client_credentials&client_id=" + storedClientId + "&client_secret=" + storedClientSecret;
+  if (net::http_post_form_json("https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token", form, doc)) {
     accessToken = doc["access_token"].as<String>();
     tokenExpiryTime = millis() + ((doc["expires_in"].as<long>() - 60) * 1000);
     return true;
