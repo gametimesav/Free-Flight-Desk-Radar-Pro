@@ -139,7 +139,7 @@ ThemeColor themes[] = {
 
 
 void drawRadarGrid();
-void fetchAndMapFlights();
+void fetchAndMapFlights(bool enableRouteLookups = true);
 void calculateBoundingBox(float lat, float lon, float rangeKm);
 void loadConfiguration();
 bool refreshOpenSkyToken();
@@ -177,7 +177,7 @@ void networkLoopTask(void * pvParameters) {
         refreshOpenSkyToken();
       }
       if (lastApiPoll == 0 || millis() - lastApiPoll >= pollInterval) {
-        fetchAndMapFlights();
+        fetchAndMapFlights(true);
         lastApiPoll = millis();
       }
     }
@@ -328,9 +328,10 @@ void setup() {
     if (apiType == "auth" && accessToken == "") {
       refreshOpenSkyToken();
     }
-    fetchAndMapFlights(); 
+    // Avoid route HTTPS lookups on loopTask during startup to keep stack usage low.
+    fetchAndMapFlights(false); 
     
-    xTaskCreatePinnedToCore(networkLoopTask, "NetworkTask", 8192, NULL, 1, &NetworkTaskHandle, 0);
+    xTaskCreatePinnedToCore(networkLoopTask, "NetworkTask", 16384, NULL, 1, &NetworkTaskHandle, 0);
   }
 }
 
@@ -728,7 +729,7 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
   }
 }
 
-void fetchAndMapFlights() {
+void fetchAndMapFlights(bool enableRouteLookups) {
   HTTPClient http;
   http.begin("https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax);
   if (apiType == "auth") http.addHeader("Authorization", "Bearer " + accessToken);
@@ -799,7 +800,9 @@ void fetchAndMapFlights() {
       }
     }
 
-    resolveRoutesForRankedPlanes(rankedPlanes, rankedCount);
+    if (enableRouteLookups) {
+      resolveRoutesForRankedPlanes(rankedPlanes, rankedCount);
+    }
     
     portENTER_CRITICAL(&radarMux);
     sharedPlaneCount = rankedCount;
