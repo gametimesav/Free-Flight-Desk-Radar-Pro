@@ -634,10 +634,15 @@ void fetchAndMapFlights() {
     deserializeJson(doc, http.getString());
     JsonArray states = doc["states"].as<JsonArray>();
     
-    int tempCount = 0;
-    ScreenPlane tempPlanes[MAX_PLANES];
+    struct RankedPlane {
+      ScreenPlane plane;
+      float distKm;
+    };
+
+    int rankedCount = 0;
+    RankedPlane rankedPlanes[MAX_PLANES];
+
     for (JsonArray plane : states) {
-      if (tempCount >= cfgMaxPlanesShown) break;
       if (plane[5].isNull() || plane[6].isNull()) continue;
 
       float lat = plane[6].as<float>();
@@ -645,11 +650,11 @@ void fetchAndMapFlights() {
       
       float dY = (lat - radarLat) * 111.1;
       float dX = (lon - radarLon) * 111.1 * cos(radarLat * PI / 180.0);
-      float r = sqrt(dX*dX + dY*dY);
-      if (r > maxRadarRangeKm) continue;
+      float distKm = sqrt(dX*dX + dY*dY);
+      if (distKm > maxRadarRangeKm) continue;
       
-      int x = 120 + (r/maxRadarRangeKm * 100.0) * sin(atan2(dX, dY));
-      int y = 120 - (r/maxRadarRangeKm * 100.0) * cos(atan2(dX, dY));
+      int x = 120 + (distKm/maxRadarRangeKm * 100.0) * sin(atan2(dX, dY));
+      int y = 120 - (distKm/maxRadarRangeKm * 100.0) * cos(atan2(dX, dY));
       
       String callsign = plane[1].as<String>();
       callsign.trim();
@@ -670,14 +675,33 @@ void fetchAndMapFlights() {
       if (headingDeg < 0.0) headingDeg = 0.0;
       if (headingDeg >= 360.0) headingDeg = fmod(headingDeg, 360.0);
 
-      tempPlanes[tempCount] = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
-      tempCount++;
+      ScreenPlane mapped = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
+
+      // Keep nearest planes first (esp-gauge style) instead of raw API order.
+      int insertPos = rankedCount;
+      while (insertPos > 0 && rankedPlanes[insertPos - 1].distKm > distKm) {
+        insertPos--;
+      }
+
+      if (insertPos >= cfgMaxPlanesShown) {
+        continue;
+      }
+
+      int lastIndex = (rankedCount < cfgMaxPlanesShown) ? rankedCount : (cfgMaxPlanesShown - 1);
+      for (int i = lastIndex; i > insertPos; i--) {
+        rankedPlanes[i] = rankedPlanes[i - 1];
+      }
+
+      rankedPlanes[insertPos] = {mapped, distKm};
+      if (rankedCount < cfgMaxPlanesShown) {
+        rankedCount++;
+      }
     }
     
     portENTER_CRITICAL(&radarMux);
-    sharedPlaneCount = tempCount;
-    for (int i = 0; i < tempCount; i++) {
-      sharedPlanes[i] = tempPlanes[i];
+    sharedPlaneCount = rankedCount;
+    for (int i = 0; i < rankedCount; i++) {
+      sharedPlanes[i] = rankedPlanes[i].plane;
     }
     updateTriggered = true;
     portEXIT_CRITICAL(&radarMux);
