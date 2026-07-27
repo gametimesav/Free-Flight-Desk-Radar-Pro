@@ -13,7 +13,6 @@
 // --- Settings & Security ---
 const bool USE_METRIC = true;
 const int SETTINGS_BUTTON_PIN = 0; 
-const char* DEVICE_PIN = "1234";
 const int BUZZER_PIN = 26;
 
 // --- Touch control pin XPT2046 ---
@@ -247,7 +246,6 @@ void setup() {
       String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
                     "<style>body{background:#000;color:#0f0;font-family:sans-serif;padding:20px;} input, select, button {margin-top:5px; padding:8px;} hr{border-color:#0f0;}</style></head><body>"
                     "<h2>DeskRadar Setup</h2><form action='/save' method='POST'>"
-                    "<label>Device PIN:</label><br><input type='password' name='pin' style='width:100%;' required><hr>"
                     "<label>Select WiFi Network:</label><br>"
                     "<select name='ssid' style='width:100%;'>" + dynamicWifiOptions + "</select><br><br>"
                     "<label>WiFi Password:</label><br>"
@@ -269,7 +267,6 @@ void setup() {
     });
     
     server.on("/save", [](){
-      if(server.arg("pin") != String(DEVICE_PIN)) { server.send(200, "text/html", "Invalid PIN"); return; }
       preferences.begin("radar-config", false);
       preferences.putFloat("lat", atof(server.arg("lat").c_str()));
       preferences.putFloat("lon", atof(server.arg("lon").c_str()));

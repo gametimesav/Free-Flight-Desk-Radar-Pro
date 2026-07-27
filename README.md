@@ -11,7 +11,6 @@ https://makerworld.com/en/models/2893782-flightdeskradar-pro#profileId-3233701
 ---
 
 ## 📋 Table of Contents
-- [DEVICE PIN: 1234 ]
 - [Overview](#overview)
 - [Features](#features)
 - [Hardware Requirements](#hardware-requirements)
