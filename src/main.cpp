@@ -77,11 +77,16 @@ struct RankedPlane {
 struct RouteCacheEntry {
   char callsign[12];
   char route[16];
+  uint8_t failCount;
+  uint32_t retryAtMs;
+  bool permanentMiss;
 };
 
 const int MAX_PLANES = 20;
 const int ROUTE_CACHE_SIZE = 24;
 const int ROUTE_LOOKUP_BUDGET = 2;
+const uint32_t ROUTE_RETRY_BASE_MS = 30000;
+const uint32_t ROUTE_RETRY_MAX_MS = 600000;
 ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
 RouteCacheEntry routeCache[ROUTE_CACHE_SIZE] = {};
@@ -156,8 +161,11 @@ void drawPlaneIcon(int x, int y, float headingDeg, uint16_t color);
 void drawMainGridControls();
 void refreshRadarScreen();
 void saveSquareGridSettings();
-const char* findCachedRoute(const String& callsign);
-void cacheRoute(const String& callsign, const String& route);
+int findRouteCacheIndex(const String& callsign);
+bool routeCacheRetryDue(const RouteCacheEntry& entry);
+void cacheRouteFound(const String& callsign, const String& route);
+void cacheRouteNotFound(const String& callsign);
+void cacheRouteTransientFailure(const String& callsign);
 bool fetchRouteForCallsign(const String& callsign, String& routeOut);
 void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount);
 
@@ -644,22 +652,76 @@ void saveSquareGridSettings() {
   preferences.end();
 }
 
-const char* findCachedRoute(const String& callsign) {
+int findRouteCacheIndex(const String& callsign) {
   for (int i = 0; i < ROUTE_CACHE_SIZE; i++) {
     if (routeCache[i].callsign[0] && callsign.equals(routeCache[i].callsign)) {
-      return routeCache[i].route;
+      return i;
     }
   }
-  return nullptr;
+  return -1;
 }
 
-void cacheRoute(const String& callsign, const String& route) {
+bool routeCacheRetryDue(const RouteCacheEntry& entry) {
+  if (entry.retryAtMs == 0) {
+    return true;
+  }
+  return (int32_t)(millis() - entry.retryAtMs) >= 0;
+}
+
+void cacheRouteFound(const String& callsign, const String& route) {
   if (callsign.length() == 0 || callsign == "UNK") {
     return;
   }
-  strlcpy(routeCache[routeCacheNext].callsign, callsign.c_str(), sizeof(routeCache[routeCacheNext].callsign));
-  strlcpy(routeCache[routeCacheNext].route, route.c_str(), sizeof(routeCache[routeCacheNext].route));
-  routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
+  int index = findRouteCacheIndex(callsign);
+  if (index < 0) {
+    index = routeCacheNext;
+    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
+  }
+  strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
+  strlcpy(routeCache[index].route, route.c_str(), sizeof(routeCache[index].route));
+  routeCache[index].failCount = 0;
+  routeCache[index].retryAtMs = 0;
+  routeCache[index].permanentMiss = false;
+}
+
+void cacheRouteNotFound(const String& callsign) {
+  if (callsign.length() == 0 || callsign == "UNK") {
+    return;
+  }
+  int index = findRouteCacheIndex(callsign);
+  if (index < 0) {
+    index = routeCacheNext;
+    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
+  }
+  strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
+  routeCache[index].route[0] = '\0';
+  routeCache[index].failCount = 0;
+  routeCache[index].retryAtMs = 0;
+  routeCache[index].permanentMiss = true;
+}
+
+void cacheRouteTransientFailure(const String& callsign) {
+  if (callsign.length() == 0 || callsign == "UNK") {
+    return;
+  }
+  int index = findRouteCacheIndex(callsign);
+  if (index < 0) {
+    index = routeCacheNext;
+    routeCacheNext = (routeCacheNext + 1) % ROUTE_CACHE_SIZE;
+    strlcpy(routeCache[index].callsign, callsign.c_str(), sizeof(routeCache[index].callsign));
+    routeCache[index].route[0] = '\0';
+    routeCache[index].failCount = 0;
+  }
+
+  if (routeCache[index].failCount < 7) {
+    routeCache[index].failCount++;
+  }
+  uint32_t retryDelayMs = ROUTE_RETRY_BASE_MS << routeCache[index].failCount;
+  if (retryDelayMs > ROUTE_RETRY_MAX_MS) {
+    retryDelayMs = ROUTE_RETRY_MAX_MS;
+  }
+  routeCache[index].retryAtMs = millis() + retryDelayMs;
+  routeCache[index].permanentMiss = false;
 }
 
 bool fetchRouteForCallsign(const String& callsign, String& routeOut) {
@@ -689,12 +751,16 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
       continue;
     }
 
-    const char* cached = findCachedRoute(callsign);
-    if (cached != nullptr) {
-      if (cached[0]) {
-        rankedPlanes[i].plane.country = String(cached);
+    int cacheIndex = findRouteCacheIndex(callsign);
+    if (cacheIndex >= 0) {
+      const RouteCacheEntry& entry = routeCache[cacheIndex];
+      if (entry.route[0]) {
+        rankedPlanes[i].plane.country = String(entry.route);
+        continue;
       }
-      continue;
+      if (entry.permanentMiss || !routeCacheRetryDue(entry)) {
+        continue;
+      }
     }
 
     if (budget <= 0) {
@@ -704,23 +770,40 @@ void resolveRoutesForRankedPlanes(RankedPlane* rankedPlanes, int rankedCount) {
     budget--;
     String route;
     if (!fetchRouteForCallsign(callsign, route)) {
-      // Cache misses as empty to avoid hammering lookups every poll.
-      cacheRoute(callsign, "");
+      cacheRouteTransientFailure(callsign);
       continue;
     }
 
-    cacheRoute(callsign, route);
-    if (route.length() > 0) {
-      rankedPlanes[i].plane.country = route;
+    if (route.length() == 0) {
+      cacheRouteNotFound(callsign);
+      continue;
     }
+
+    cacheRouteFound(callsign, route);
+    rankedPlanes[i].plane.country = route;
   }
 }
 
 void fetchAndMapFlights(bool enableRouteLookups) {
   String url = "https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax;
+  JsonDocument filter;
+  filter["states"][0][1] = true;   // callsign
+  filter["states"][0][2] = true;   // country
+  filter["states"][0][5] = true;   // lon
+  filter["states"][0][6] = true;   // lat
+  filter["states"][0][7] = true;   // altitude
+  filter["states"][0][9] = true;   // velocity
+  filter["states"][0][10] = true;  // heading
+
   JsonDocument doc;
   const char* bearer = (apiType == "auth" && accessToken.length() > 0) ? accessToken.c_str() : nullptr;
-  if (net::http_get_json(url, doc, nullptr, bearer)) {
+  bool gotData = net::http_get_json(url, doc, &filter, bearer);
+  if (gotData && doc["states"].isNull()) {
+    doc.clear();
+    gotData = net::http_get_json(url, doc, nullptr, bearer);
+  }
+
+  if (gotData) {
     pollInterval = (apiType == "auth") ? 11000 : 108000; 
     JsonArray states = doc["states"].as<JsonArray>();
     
