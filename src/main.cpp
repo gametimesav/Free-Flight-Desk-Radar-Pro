@@ -1,5 +1,6 @@
 #include <FS.h>
 #include <WiFi.h>
+#include <DNSServer.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -34,11 +35,14 @@ String lamin, lomin, lamax, lomax;
 TFT_eSPI tft = TFT_eSPI();
 Preferences preferences;
 WebServer server(80);
+DNSServer dnsServer;
 String accessToken = "";
 unsigned long tokenExpiryTime = 0;
 int pollInterval = 108000; 
 bool isConfigured = false, needsReboot = false;
+bool captivePortalActive = false;
 String dynamicWifiOptions = "";
+const byte DNS_PORT = 53;
 
 // --- DeskRadar Pro Variables ---
 bool inSettingsMode = false;
@@ -234,7 +238,10 @@ void setup() {
     updateStatusScreen("WIFI FAILED", "Scanning...", themes[cfgThemeIdx].primary);
     runNetworkScan();
     WiFi.mode(WIFI_AP);
+    WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
     WiFi.softAP("DeskRadar-Setup");
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+    captivePortalActive = true;
     
     server.on("/", [](){
       String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
@@ -283,6 +290,14 @@ void setup() {
       server.send(200, "text/html", "<h3>Settings Saved. Rebooting...</h3>");
       needsReboot = true;
     });
+
+    // Captive portal probes used by Android/iOS/Windows.
+    server.on("/generate_204", [](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
+    server.on("/gen_204", [](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
+    server.on("/hotspot-detect.html", [](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
+    server.on("/ncsi.txt", [](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
+    server.on("/connecttest.txt", [](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
+    server.onNotFound([](){ server.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); server.send(302, "text/plain", ""); });
     
     server.begin();
     updateStatusScreen("PORTAL ACTIVE", "192.168.4.1", themes[cfgThemeIdx].primary);
@@ -313,6 +328,9 @@ void loop() {
   }
 
   if (!isConfigured) {
+    if (captivePortalActive) {
+      dnsServer.processNextRequest();
+    }
     server.handleClient();
     if (needsReboot) { delay(2000); ESP.restart(); }
     return;

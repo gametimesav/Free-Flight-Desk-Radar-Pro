@@ -111,7 +111,7 @@ Notes:
 1. Power on your DeskRadar Pro device.
 2. On first boot, the device will broadcast a temporary setup hotspot named **`DeskRadar-Setup`**.
 3. Connect your phone or computer to this hotspot.
-4. Open a browser and navigate to `192.168.4.1`.
+4. Most devices will automatically open a captive portal setup page. If it does not appear, open a browser and navigate to `192.168.4.1`.
 5. Select your home WiFi network from the list and enter your WiFi password.
 6. The device will reboot and connect to your home network automatically.
 
