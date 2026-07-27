@@ -2,13 +2,16 @@
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <WebServer.h>
-#include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h> 
 #include <TFT_eSPI.h>
 #include <cmath>
 #include <Preferences.h>
+
+#include "net_fetch.h"
+#include "radar_data.h"
+#include "radar_model.h"
 
 // --- Settings & Security ---
 const bool USE_METRIC = true;
@@ -40,6 +43,7 @@ unsigned long tokenExpiryTime = 0;
 int pollInterval = 108000; 
 bool isConfigured = false, needsReboot = false;
 bool captivePortalActive = false;
+bool cfgNetDiagVerbose = false;
 String dynamicWifiOptions = "";
 const byte DNS_PORT = 53;
 
@@ -50,25 +54,9 @@ unsigned long lastSweepUpdate = 0;
 unsigned long lastBlinkUpdate = 0;
 unsigned long lastPlaneMotionUpdate = 0;
 
-struct ScreenPlane {
-  int x;
-  int y;
-  int lastX;
-  int lastY; 
-  String callsign;
-  String altStr;
-  String country; 
-  float lat;
-  float lon;
-  float velocityMs;
-  float headingDeg;
-  unsigned long positionTime;
-  float brightness; 
-  bool soundTriggered;
-};
-const int MAX_PLANES = 20;
 ScreenPlane currentPlanes[MAX_PLANES];
 int currentPlaneCount = 0;
+NetTelemetry netTelemetry;
 
 // Safe cross-core data sharing for radar plane data.
 portMUX_TYPE radarMux = portMUX_INITIALIZER_UNLOCKED; 
@@ -124,7 +112,7 @@ ThemeColor themes[] = {
 
 
 void drawRadarGrid();
-void fetchAndMapFlights();
+void fetchAndMapFlights(bool enableRouteLookups = true);
 void calculateBoundingBox(float lat, float lon, float rangeKm);
 void loadConfiguration();
 bool refreshOpenSkyToken();
@@ -139,6 +127,7 @@ void drawPlaneIcon(int x, int y, float headingDeg, uint16_t color);
 void drawMainGridControls();
 void refreshRadarScreen();
 void saveSquareGridSettings();
+void logNetTelemetryMaybe();
 
 TaskHandle_t NetworkTaskHandle = NULL;
 
@@ -158,7 +147,8 @@ void networkLoopTask(void * pvParameters) {
         refreshOpenSkyToken();
       }
       if (lastApiPoll == 0 || millis() - lastApiPoll >= pollInterval) {
-        fetchAndMapFlights();
+        fetchAndMapFlights(true);
+        logNetTelemetryMaybe();
         lastApiPoll = millis();
       }
     }
@@ -206,6 +196,7 @@ void setup() {
   preferences.begin("radar-config", true);
   isConfigured = preferences.getBool("configured", false);
   bool forcePortal = preferences.getBool("force_portal", false);
+  cfgNetDiagVerbose = preferences.getBool("net_diag", false);
   preferences.end();
 
   // Handle forced setup portal mode.
@@ -262,6 +253,8 @@ void setup() {
                     "<input type='password' id='op' name='osec' style='flex-grow:1;'>"
                     "<input type='checkbox' onclick='document.getElementById(\"op\").type=this.checked?\"text\":\"password\"' style='margin-left:10px;'> Show"
                     "</div><hr>"
+                    "<label style='display:flex; align-items:center; gap:8px;'><input type='checkbox' name='diag' value='1'"
+                    + String(cfgNetDiagVerbose ? " checked" : "") + "> Enable network diagnostics logs</label><hr>"
                     "<button type='submit' style='background:#0f0;color:#000;font-weight:bold;width:100%;font-size:18px;'>SAVE & REBOOT</button></form></body></html>";
       server.send(200, "text/html", html);
     });
@@ -283,6 +276,7 @@ void setup() {
       } else {
         preferences.putString("api_type", "guest");
       }
+      preferences.putBool("net_diag", server.hasArg("diag"));
       preferences.end();
       server.send(200, "text/html", "<h3>Settings Saved. Rebooting...</h3>");
       needsReboot = true;
@@ -309,9 +303,10 @@ void setup() {
     if (apiType == "auth" && accessToken == "") {
       refreshOpenSkyToken();
     }
-    fetchAndMapFlights(); 
+    // Avoid route HTTPS lookups on loopTask during startup to keep stack usage low.
+    fetchAndMapFlights(false); 
     
-    xTaskCreatePinnedToCore(networkLoopTask, "NetworkTask", 8192, NULL, 1, &NetworkTaskHandle, 0);
+    xTaskCreatePinnedToCore(networkLoopTask, "NetworkTask", 16384, NULL, 1, &NetworkTaskHandle, 0);
   }
 }
 
@@ -622,67 +617,70 @@ void saveSquareGridSettings() {
   preferences.end();
 }
 
-void fetchAndMapFlights() {
-  HTTPClient http;
-  http.begin("https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax);
-  if (apiType == "auth") http.addHeader("Authorization", "Bearer " + accessToken);
-  
-  int httpCode = http.GET();
-  if (httpCode == 200) {
+void logNetTelemetryMaybe() {
+  if (!cfgNetDiagVerbose) {
+    return;
+  }
+  if (millis() - netTelemetry.lastLogMs < 60000) {
+    return;
+  }
+  netTelemetry.lastLogMs = millis();
+  Serial.printf("[net] opensky ok=%lu fail=%lu route(cache=%lu resolved=%lu not_found=%lu retry=%lu)\n",
+                netTelemetry.openskyOk,
+                netTelemetry.openskyFail,
+                netTelemetry.routeCacheHits,
+                netTelemetry.routeResolved,
+                netTelemetry.routeNotFound,
+                netTelemetry.routeTransientFail);
+}
+
+void fetchAndMapFlights(bool enableRouteLookups) {
+  String url = "https://opensky-network.org/api/states/all?lamin=" + lamin + "&lomin=" + lomin + "&lamax=" + lamax + "&lomax=" + lomax;
+  JsonDocument filter;
+  filter["states"][0][1] = true;   // callsign
+  filter["states"][0][2] = true;   // country
+  filter["states"][0][5] = true;   // lon
+  filter["states"][0][6] = true;   // lat
+  filter["states"][0][7] = true;   // altitude
+  filter["states"][0][8] = true;   // on_ground
+  filter["states"][0][9] = true;   // velocity
+  filter["states"][0][10] = true;  // heading
+  filter["states"][0][11] = true;  // vertical rate
+  filter["states"][0][14] = true;  // squawk
+
+  JsonDocument doc;
+  const char* bearer = (apiType == "auth" && accessToken.length() > 0) ? accessToken.c_str() : nullptr;
+  bool gotData = net::http_get_json(url, doc, &filter, bearer);
+  if (gotData && doc["states"].isNull()) {
+    doc.clear();
+    gotData = net::http_get_json(url, doc, nullptr, bearer);
+  }
+
+  if (gotData) {
+    netTelemetry.openskyOk++;
     pollInterval = (apiType == "auth") ? 11000 : 108000; 
-    JsonDocument doc;
-    deserializeJson(doc, http.getString());
     JsonArray states = doc["states"].as<JsonArray>();
     
-    int tempCount = 0;
-    ScreenPlane tempPlanes[MAX_PLANES];
-    for (JsonArray plane : states) {
-      if (tempCount >= cfgMaxPlanesShown) break;
-      if (plane[5].isNull() || plane[6].isNull()) continue;
+    RankedPlane rankedPlanes[MAX_PLANES];
+    int rankedCount = 0;
+    radar_data::parseOpenSkyStates(states, radarLat, radarLon, maxRadarRangeKm,
+                                   cfgMaxPlanesShown, USE_METRIC,
+                                   rankedPlanes, rankedCount);
 
-      float lat = plane[6].as<float>();
-      float lon = plane[5].as<float>();
-      
-      float dY = (lat - radarLat) * 111.1;
-      float dX = (lon - radarLon) * 111.1 * cos(radarLat * PI / 180.0);
-      float r = sqrt(dX*dX + dY*dY);
-      if (r > maxRadarRangeKm) continue;
-      
-      int x = 120 + (r/maxRadarRangeKm * 100.0) * sin(atan2(dX, dY));
-      int y = 120 - (r/maxRadarRangeKm * 100.0) * cos(atan2(dX, dY));
-      
-      String callsign = plane[1].as<String>();
-      callsign.trim();
-      if(callsign == "" || callsign == "null") callsign = "UNK";
-
-      String country = plane[2].as<String>();
-      if(country == "null" || country == "") country = "UNK";
-      if(country == "United States") country = "USA";
-      if(country == "United Kingdom") country = "UK";
-      if(country == "Russian Federation") country = "Russia";
-      if(country.length() > 8) country = country.substring(0, 8); 
-
-      float alt = plane[7].as<float>();
-      String altStr = USE_METRIC ? String((int)alt) + "m" : String((int)(alt * 3.28084)) + "ft";
-
-      float velocityMs = plane[9].isNull() ? 0.0 : plane[9].as<float>();
-      float headingDeg = plane[10].isNull() ? 0.0 : plane[10].as<float>();
-      if (headingDeg < 0.0) headingDeg = 0.0;
-      if (headingDeg >= 360.0) headingDeg = fmod(headingDeg, 360.0);
-
-      tempPlanes[tempCount] = {x, y, 0, 0, callsign, altStr, country, lat, lon, velocityMs, headingDeg, millis(), 1.0, false};
-      tempCount++;
+    if (enableRouteLookups) {
+      radar_data::resolveRoutesForRankedPlanes(rankedPlanes, rankedCount, netTelemetry);
     }
     
     portENTER_CRITICAL(&radarMux);
-    sharedPlaneCount = tempCount;
-    for (int i = 0; i < tempCount; i++) {
-      sharedPlanes[i] = tempPlanes[i];
+    sharedPlaneCount = rankedCount;
+    for (int i = 0; i < rankedCount; i++) {
+      sharedPlanes[i] = rankedPlanes[i].plane;
     }
     updateTriggered = true;
     portEXIT_CRITICAL(&radarMux);
+  } else {
+    netTelemetry.openskyFail++;
   }
-  http.end();
 }
 
 void drawSettingsUI() {
@@ -836,6 +834,7 @@ void loadConfiguration() {
   storedClientSecret = preferences.getString("client_secret", ""); //Number obtained from the website opensky
   storedSsid = preferences.getString("ssid", "");
   storedPass = preferences.getString("pass", "");
+  cfgNetDiagVerbose = preferences.getBool("net_diag", false);
   preferences.end();
   
   calculateBoundingBox(radarLat, radarLon, maxRadarRangeKm);
@@ -850,12 +849,9 @@ void calculateBoundingBox(float lat, float lon, float rangeKm) {
 }
 
 bool refreshOpenSkyToken() {
-  HTTPClient http;
-  http.begin("https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token");
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  if (http.POST("grant_type=client_credentials&client_id=" + storedClientId + "&client_secret=" + storedClientSecret) == 200) {
-    JsonDocument doc;
-    deserializeJson(doc, http.getString());
+  JsonDocument doc;
+  String form = "grant_type=client_credentials&client_id=" + storedClientId + "&client_secret=" + storedClientSecret;
+  if (net::http_post_form_json("https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token", form, doc)) {
     accessToken = doc["access_token"].as<String>();
     tokenExpiryTime = millis() + ((doc["expires_in"].as<long>() - 60) * 1000);
     return true;
