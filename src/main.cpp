@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <WiFiManager.h>
 #include <XPT2046_Touchscreen.h>
-#include <lvgl.h>
 
 #include "board_config.h"
 #include "settings.h"
@@ -24,8 +23,6 @@
 namespace {
 
 constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
-constexpr bool DISPLAY_TEXT_DIAGNOSTIC_MODE = false;
-constexpr bool LVGL_TEXT_DIAGNOSTIC_MODE = false;
 constexpr int TOUCH_MIN_Z = 120;
 constexpr int TOUCH_RAW_MIN_X = 180;
 constexpr int TOUCH_RAW_MAX_X = 3920;
@@ -251,23 +248,6 @@ void setup() {
 
     settings::begin();
     display::begin();
-
-    if (DISPLAY_TEXT_DIAGNOSTIC_MODE) {
-        display::show_direct_text_diagnostic("HELLO");
-        while (true) delay(1000);
-    }
-
-    if (LVGL_TEXT_DIAGNOSTIC_MODE) {
-        lv_obj_t* label = lv_label_create(lv_screen_active());
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_48, 0);
-        lv_obj_set_style_text_color(label, lv_color_white(), 0);
-        lv_label_set_text(label, "HELLO");
-        lv_obj_center(label);
-        while (true) {
-            display::tick();
-            delay(5);
-        }
-    }
 
     ui::begin();
 

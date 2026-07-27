@@ -16,7 +16,7 @@ constexpr int LCD_BL   = 21;
 
 constexpr int LCD_WIDTH  = 320;
 constexpr int LCD_HEIGHT = 240;
-constexpr uint32_t LCD_SPI_FREQ_HZ = 27 * 1000 * 1000;
+constexpr uint32_t LCD_SPI_FREQ_HZ = 16 * 1000 * 1000;
 constexpr int LCD_ROTATION = 3;
 
 // Physical ILI9341 panel memory geometry stays portrait even when runtime UI

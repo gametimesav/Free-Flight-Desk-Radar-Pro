@@ -16,7 +16,4 @@ void tick();
 void set_brightness(uint8_t value);
 uint8_t brightness();
 
-// Direct panel diagnostic: bypasses LVGL and draws a simple centered word.
-void show_direct_text_diagnostic(const char* text);
-
 }  // namespace display
