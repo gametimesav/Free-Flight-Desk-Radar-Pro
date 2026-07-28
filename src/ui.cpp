@@ -1365,13 +1365,24 @@ void set_mode(settings::Mode m) {
 }
 
 void apply_settings() {
-    // Rebuild all screens so theme / range / labels update, then reload the
-    // right screen. One load only — a separate set_mode() first would start
-    // a fade that the rebuild's lv_obj_clean() then guts mid-animation.
+    // Rebuild the status screen and the target screen only. Recreating the
+    // currently displayed screen while it is active can crash LVGL on this
+    // board, so we avoid cleaning and re-creating the visible screen.
     build_status_screen();
-    build_radar_screen();
-    build_weather_screen();
-    build_home_screen();
+    if (!status_active) {
+        switch (settings::state().mode) {
+            case settings::Mode::Radar:   build_radar_screen(); break;
+            case settings::Mode::Weather: build_weather_screen(); break;
+            case settings::Mode::Home:    build_home_screen(); break;
+            case settings::Mode::Auto: {
+                lv_obj_t* target = target_for_mode();
+                if (target == screen_radar) build_radar_screen();
+                else if (target == screen_wx) build_weather_screen();
+                else if (target == screen_home) build_home_screen();
+                break;
+            }
+        }
+    }
     current = settings::state().mode;
     lv_obj_t* target = status_active ? screen_status : target_for_mode();
     shown = nullptr;

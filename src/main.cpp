@@ -231,11 +231,8 @@ void setup() {
 
     connect_or_ap();
     web::begin();
-    // Keep the setup page responsive; background pollers can exhaust the
-    // ESP32's limited HTTPS/TLS heap and stall the web server under load.
-    // They are started only after the user leaves the setup UI.
-    // radar::begin();
-    // weather::begin();
+    radar::begin();
+    weather::begin();
     homeassistant::begin();
 
     // Let the user see the IP for a moment before switching to their mode.

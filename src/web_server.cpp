@@ -29,14 +29,27 @@ constexpr uint16_t DNS_PORT = 53;
 
 bool serve_littlefs_file(AsyncWebServerRequest* req, const char* path,
                          const char* content_type) {
-    if (!LittleFS.exists(path)) {
-        log_w("[http] missing asset %s", path);
+    String normalized = path ? String(path) : "";
+    if (normalized.length() == 0 || normalized[0] != '/') {
+        normalized = "/" + normalized;
+    }
+    const char* fs_path = normalized.c_str();
+
+    if (!LittleFS.exists(fs_path)) {
+        log_w("[http] missing asset %s", fs_path);
         req->send(404, "text/plain", "Missing asset");
         return false;
     }
 
-    log_i("[http] GET %s -> %s", req->url().c_str(), path);
-    req->send(LittleFS, path, content_type);
+    log_i("[http] GET %s -> %s", req->url().c_str(), fs_path);
+    AsyncWebServerResponse* res = req->beginResponse(LittleFS, fs_path, content_type);
+    if (!res) {
+        log_e("[http] failed to build response for %s", fs_path);
+        req->send(500, "text/plain", "Unable to read asset");
+        return false;
+    }
+    res->addHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    req->send(res);
     return true;
 }
 
@@ -242,7 +255,7 @@ void register_routes() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         log_i("[http] GET %s", req->url().c_str());
         if (LittleFS.exists("/index.html")) {
-            req->send(LittleFS, "/index.html", "text/html; charset=utf-8");
+            serve_littlefs_file(req, "/index.html", "text/html; charset=utf-8");
             return;
         }
         req->send(200, "text/html; charset=utf-8", kFallbackIndexHtml);
