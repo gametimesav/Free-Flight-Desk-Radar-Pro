@@ -1,2 +1,1 @@
-sky-gauge-stable-20260727-203351
-sky-gauge-stable-20260727-203352-littlefs.bin
+Free-Flight-Desk-Radar-Pro-v1.5.bin
