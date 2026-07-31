@@ -44,6 +44,7 @@ struct RadarConfig {
     uint16_t range_km   = 100;    // scope radius
     uint16_t poll_s     = 10;     // adsb.lol poll interval
     bool     show_tags  = true;   // callsign label next to each blip
+    bool     show_ground= true;   // show aircraft tagged as "ground"
     uint8_t  theme      = 0;      // 0 = green phosphor, 1 = amber
     uint16_t alert_km   = 3;      // pin focus + pulse when traffic this close; 0 = off
     uint16_t auto_km    = 5;      // Auto mode: show radar while traffic this close; 0 = off

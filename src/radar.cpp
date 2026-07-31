@@ -82,6 +82,8 @@ void poll_positions(float home_lat, float home_lon, uint16_t range_km) {
     uint16_t total_in_range = 0;
     float cos_lat = cosf(home_lat * DEG2RAD);
 
+    const auto& radar_cfg = settings::state().radar;
+
     for (JsonObjectConst ac : doc["ac"].as<JsonArrayConst>()) {
         if (!ac["lat"].is<float>() || !ac["lon"].is<float>()) continue;
 
@@ -103,6 +105,7 @@ void poll_positions(float home_lat, float home_lon, uint16_t range_km) {
         } else {
             a.alt_ft = alt | 0;
         }
+        if (a.on_ground && !radar_cfg.show_ground) continue;
         a.gs_kt     = (int16_t)lroundf(ac["gs"] | 0.0f);
         a.track_deg = (int16_t)lroundf(ac["track"] | 0.0f);
         a.baro_rate = (int16_t)constrain((int)(ac["baro_rate"] | 0), -32000, 32000);
@@ -229,14 +232,27 @@ void begin() {
 size_t get_aircraft(Aircraft* out, size_t cap) {
     if (!mutex) return 0;
     xSemaphoreTake(mutex, portMAX_DELAY);
-    size_t n = min(aircraft_n, cap);
-    memcpy(out, aircraft, n * sizeof(Aircraft));
+    const auto& cfg = settings::state().radar;
+    size_t n = 0;
+    for (size_t i = 0; i < aircraft_n && n < cap; ++i) {
+        if (aircraft[i].on_ground && !cfg.show_ground) continue;
+        out[n++] = aircraft[i];
+    }
     xSemaphoreGive(mutex);
     return n;
 }
 
 uint16_t total_in_range() {
-    return total_in_range_n;
+    if (!mutex) return 0;
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    const auto& cfg = settings::state().radar;
+    uint16_t n = 0;
+    for (size_t i = 0; i < aircraft_n; ++i) {
+        if (aircraft[i].on_ground && !cfg.show_ground) continue;
+        n++;
+    }
+    xSemaphoreGive(mutex);
+    return n;
 }
 
 Status status() { return cur_status; }

@@ -9,7 +9,7 @@
     conn: $('conn'),
     brightness: $('brightness'), brightnessVal: $('brightnessVal'),
     radarLat: $('radarLat'), radarLon: $('radarLon'), radarRange: $('radarRange'),
-    radarPoll: $('radarPoll'), radarTags: $('radarTags'),
+    radarPoll: $('radarPoll'), radarTags: $('radarTags'), radarShowGround: $('radarShowGround'),
     radarTheme: $('radarTheme'), radarAlert: $('radarAlert'), radarAuto: $('radarAuto'),
     radarAutoWx: $('radarAutoWx'), radarAutoHome: $('radarAutoHome'),
     radarSaveBtn: $('radarSaveBtn'), radarStatus: $('radarStatus'),
@@ -170,6 +170,7 @@
     el.radarRange.value = s.radar?.range_km ?? 100;
     el.radarPoll.value  = s.radar?.poll_s ?? 10;
     el.radarTags.checked = s.radar?.show_tags ?? true;
+    el.radarShowGround.checked = s.radar?.show_ground ?? true;
     el.radarTheme.value  = String(s.radar?.theme ?? 0);
     el.radarAlert.value  = s.radar?.alert_km ?? 3;
     el.radarAuto.value   = s.radar?.auto_km ?? 5;
@@ -242,6 +243,7 @@
         range_km: Number(el.radarRange.value) || 100,
         poll_s:   Number(el.radarPoll.value)  || 10,
         show_tags: el.radarTags.checked,
+        show_ground: el.radarShowGround.checked,
         theme:    Number(el.radarTheme.value) || 0,
         alert_km: Math.max(0, Number(el.radarAlert.value) || 0),
         auto_km:  Math.max(0, Number(el.radarAuto.value) || 0),

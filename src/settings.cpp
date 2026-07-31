@@ -102,6 +102,7 @@ void begin() {
     load_scalar("r_rng",  snap.radar.range_km);
     load_scalar("r_poll", snap.radar.poll_s);
     load_scalar("r_tags", snap.radar.show_tags);
+    load_scalar("r_gnd",  snap.radar.show_ground);
     load_scalar("r_thm",  snap.radar.theme);
     load_scalar("r_alrt", snap.radar.alert_km);
     load_scalar("r_auto", snap.radar.auto_km);
@@ -146,6 +147,7 @@ void save() {
     prefs.putUShort("r_rng",  snap.radar.range_km);
     prefs.putUShort("r_poll", snap.radar.poll_s);
     prefs.putBool("r_tags",  snap.radar.show_tags);
+    prefs.putBool("r_gnd",   snap.radar.show_ground);
     prefs.putUChar("r_thm",  snap.radar.theme);
     prefs.putUShort("r_alrt", snap.radar.alert_km);
     prefs.putUShort("r_auto", snap.radar.auto_km);
@@ -234,6 +236,7 @@ bool apply_json(JsonVariantConst patch) {
         changed |= maybe_set<uint16_t>(r["range_km"], snap.radar.range_km);
         changed |= maybe_set<uint16_t>(r["poll_s"],   snap.radar.poll_s);
         changed |= maybe_set<bool>(r["show_tags"],    snap.radar.show_tags);
+        changed |= maybe_set<bool>(r["show_ground"],  snap.radar.show_ground);
         changed |= maybe_set<uint8_t>(r["theme"],     snap.radar.theme);
         changed |= maybe_set<uint16_t>(r["alert_km"], snap.radar.alert_km);
         changed |= maybe_set<uint16_t>(r["auto_km"],  snap.radar.auto_km);
@@ -305,9 +308,10 @@ void to_json(JsonObject out, bool include_secrets) {
     r["lat"]       = snap.radar.lat;
     r["lon"]       = snap.radar.lon;
     r["range_km"]  = snap.radar.range_km;
-    r["poll_s"]    = snap.radar.poll_s;
-    r["show_tags"] = snap.radar.show_tags;
-    r["theme"]     = snap.radar.theme;
+    r["poll_s"]     = snap.radar.poll_s;
+    r["show_tags"]  = snap.radar.show_tags;
+    r["show_ground"] = snap.radar.show_ground;
+    r["theme"]      = snap.radar.theme;
     r["alert_km"]  = snap.radar.alert_km;
     r["auto_km"]   = snap.radar.auto_km;
     r["auto_base"] = snap.radar.auto_base;

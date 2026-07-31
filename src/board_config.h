@@ -14,15 +14,17 @@ constexpr int LCD_CS   = 15;
 constexpr int LCD_RST  = -1;
 constexpr int LCD_BL   = 21;
 
+// This panel is a 320x240 landscape display. Keep the runtime UI and TFT
+// geometry aligned to the physical panel instead of the previous portrait
+// 240x320 assumption.
 constexpr int LCD_WIDTH  = 320;
 constexpr int LCD_HEIGHT = 240;
 constexpr uint32_t LCD_SPI_FREQ_HZ = 16 * 1000 * 1000;
 constexpr int LCD_ROTATION = 1;
 
-// Physical ILI9341 panel memory geometry stays portrait even when runtime UI
-// is landscape. Tune offsets if any edge is clipped.
-constexpr int LCD_PANEL_MEMORY_WIDTH  = 240;
-constexpr int LCD_PANEL_MEMORY_HEIGHT = 320;
+// Physical ILI9341 panel memory geometry remains landscape for the runtime UI.
+constexpr int LCD_PANEL_MEMORY_WIDTH  = 320;
+constexpr int LCD_PANEL_MEMORY_HEIGHT = 240;
 constexpr int LCD_PANEL_OFFSET_X = 0;
 constexpr int LCD_PANEL_OFFSET_Y = 0;
 
