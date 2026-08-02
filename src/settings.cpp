@@ -94,7 +94,7 @@ void begin() {
     load_scalar("mode", mode_u8);
     // Values from the retired audio-gauge firmware (or junk) fall back to Radar.
     snap.mode = mode_u8 <= static_cast<uint8_t>(Mode::Auto)
-                    ? static_cast<Mode>(mode_u8) : Mode::Radar;
+                    ? static_cast<Mode>(mode_u8) : Mode::Auto;
     load_scalar("bri", snap.brightness);
 
     load_scalar("r_lat",  snap.radar.lat);

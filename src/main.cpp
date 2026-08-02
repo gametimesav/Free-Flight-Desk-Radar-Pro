@@ -70,7 +70,9 @@ bool read_touch_xy(int& sx, int& sy) {
 }
 
 bool should_enter_touch_setup() {
-    if (strlen(settings::state().wifi_ssid) == 0) return true;
+    // On first boot there is no saved Wi-Fi, so go straight to the setup AP
+    // instead of blocking on the Wi-Fi Manager portal.
+    if (strlen(settings::state().wifi_ssid) == 0) return false;
 
     init_touch();
     ui::update_status("Hold touch to setup", "(2 seconds)");
@@ -137,6 +139,9 @@ String ap_ssid() {
 bool try_sta(const char* ssid, const char* pwd) {
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(settings::state().hostname);
+    WiFi.setAutoConnect(true);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
     // Disable WiFi modem-sleep (power save). It's on by default and is a
     // notorious cause of "associated but unresponsive / dropping connections"
     // flakiness — which this unit suffered repeatedly. This is a mains/USB
@@ -145,27 +150,65 @@ bool try_sta(const char* ssid, const char* pwd) {
     WiFi.begin(ssid, pwd);
     log_i("WiFi STA → SSID='%s'", ssid);
 
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_TIMEOUT_MS) {
+    const uint32_t t0 = millis();
+    while (millis() - t0 < WIFI_TIMEOUT_MS) {
+        const wl_status_t st = WiFi.status();
+        if (st == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+            break;
+        }
+        if (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL || st == WL_WRONG_PASSWORD) {
+            break;
+        }
         delay(250);
     }
-    if (WiFi.status() != WL_CONNECTED) {
+
+    if (WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
         WiFi.disconnect(true);
         return false;
     }
+
+    delay(750); // let DHCP and the TCP stack settle before the web server starts
     log_i("WiFi connected, IP = %s", WiFi.localIP().toString().c_str());
     return true;
 }
 
 void start_ap_mode() {
-    WiFi.mode(WIFI_AP);
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.setSleep(false);
+
+    IPAddress ap_ip(192, 168, 4, 1);
+    IPAddress ap_netmask(255, 255, 255, 0);
+    if (!WiFi.softAPConfig(ap_ip, ap_ip, ap_netmask)) {
+        log_w("softAPConfig returned false");
+    }
+
     String ssid = ap_ssid();
-    WiFi.softAP(ssid.c_str(), nullptr);
-    log_i("AP mode '%s' on %s", ssid.c_str(), WiFi.softAPIP().toString().c_str());
-    log_i("Open setup at http://%s", WiFi.softAPIP().toString().c_str());
+    const bool ap_ok = WiFi.softAP(ssid.c_str(), nullptr);
+    if (!ap_ok) {
+        log_e("AP start failed for '%s'", ssid.c_str());
+        ui::update_status("AP failed", "Check WiFi state");
+        return;
+    }
+
+    for (int i = 0; i < 20; i++) {
+        IPAddress ip = WiFi.softAPIP();
+        if (ip != IPAddress(0, 0, 0, 0)) {
+            delay(100);
+            break;
+        }
+        delay(100);
+    }
+
+    IPAddress ap_ip_out = WiFi.softAPIP();
+    log_i("AP mode '%s' on %s", ssid.c_str(), ap_ip_out.toString().c_str());
+    log_i("Open setup at http://%s", ap_ip_out.toString().c_str());
     char l1[40];
     snprintf(l1, sizeof(l1), "AP %s", ssid.c_str());
-    ui::update_status(l1, WiFi.softAPIP().toString().c_str());
+    ui::update_status(l1, ap_ip_out.toString().c_str());
 }
 
 void connect_or_ap() {
@@ -230,6 +273,9 @@ void setup() {
     }
 
     connect_or_ap();
+    if (WiFi.getMode() == WIFI_STA && WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+        delay(1000);
+    }
     web::begin();
     radar::begin();
     weather::begin();

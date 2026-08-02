@@ -62,7 +62,7 @@ struct Snapshot {
     char     timezone[48]     = "UTC0";
 
     // display
-    Mode     mode             = Mode::Radar;
+    Mode     mode             = Mode::Auto;
     uint8_t  brightness       = 255;
 
     RadarConfig radar;

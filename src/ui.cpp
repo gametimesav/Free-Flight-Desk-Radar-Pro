@@ -37,7 +37,7 @@ constexpr lv_color_t COL_RAIN      = LV_COLOR_MAKE(79,  195, 247);
 constexpr lv_color_t COL_SNOW      = LV_COLOR_MAKE(235, 245, 255);
 
 // ── Shared state ─────────────────────────────────────────────────────────────
-settings::Mode current = settings::Mode::Radar;
+settings::Mode current = settings::Mode::Auto;
 bool status_active = false;   // boot/status screen is on display
 
 lv_obj_t* screen_status = nullptr;
@@ -1310,23 +1310,38 @@ void auto_timer_cb(lv_timer_t*) {
 
     const auto& cfg = settings::state().radar;
     static uint32_t last_traffic_ms = 0;
+    static bool last_radar = false;
 
     bool traffic = false;
+    bool radar_requested = false;
     if (cfg.auto_km > 0) {
         radar::Aircraft ac[radar::MAX_AIRCRAFT];
         size_t n = radar::get_aircraft(ac, radar::MAX_AIRCRAFT);
         for (size_t i = 0; i < n; i++) {
-            if (!ac[i].on_ground && ac[i].dist_km <= (float)cfg.auto_km) {
+            if (ac[i].on_ground) continue;
+            if (ac[i].dist_km <= (float)cfg.auto_km) {
                 traffic = true;
                 break;
             }
         }
+        radar_requested = true;
     }
 
     uint32_t now = millis();
-    if (traffic) last_traffic_ms = now;
+    if (traffic) {
+        last_traffic_ms = now;
+        last_radar = true;
+    } else if (radar_requested && last_radar) {
+        // If Auto mode was previously showing radar and the latest poll shows
+        // no nearby traffic, fall back to the base screen immediately instead
+        // of staying on radar just because the hold timer is still active.
+        last_radar = false;
+        last_traffic_ms = 0;
+    }
+
     bool hold = last_traffic_ms != 0 && now - last_traffic_ms < AUTO_HOLD_MS;
-    load_screen(traffic || hold ? screen_radar : auto_base_screen());
+    lv_obj_t* target = (traffic || hold) ? screen_radar : auto_base_screen();
+    if (target != shown) load_screen(target);
 }
 
 // Screen the current settings mode wants displayed right now.

@@ -37,7 +37,7 @@ bool serve_littlefs_file(AsyncWebServerRequest* req, const char* path,
 
     if (!LittleFS.exists(fs_path)) {
         log_w("[http] missing asset %s", fs_path);
-        req->send(404, "text/plain", "Missing asset");
+        req->send(200, "text/html; charset=utf-8", kFallbackIndexHtml);
         return false;
     }
 
@@ -45,7 +45,7 @@ bool serve_littlefs_file(AsyncWebServerRequest* req, const char* path,
     AsyncWebServerResponse* res = req->beginResponse(LittleFS, fs_path, content_type);
     if (!res) {
         log_e("[http] failed to build response for %s", fs_path);
-        req->send(500, "text/plain", "Unable to read asset");
+        req->send(200, "text/html; charset=utf-8", kFallbackIndexHtml);
         return false;
     }
     res->addHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
@@ -107,10 +107,15 @@ bool safe_ws_text_all(const String& out, const char* tag) {
 }
 
 void send_state_to(AsyncWebSocketClient* client) {
-    JsonDocument doc;
+    StaticJsonDocument<512> doc;
     doc["type"] = "state";
     JsonObject data = doc["data"].to<JsonObject>();
-    settings::to_json(data, false);
+    data["mode"] = static_cast<uint8_t>(settings::state().mode);
+    data["brightness"] = settings::state().brightness;
+    data["wifi"]["hostname"] = settings::state().hostname;
+    data["wifi"]["ssid"] = settings::state().wifi_ssid;
+    data["wifi"]["password"] = strlen(settings::state().wifi_password) ? "********" : "";
+    data["wifi"]["tz"] = settings::state().timezone;
 
     String out;
     serializeJson(doc, out);
@@ -124,10 +129,15 @@ void send_state_to(AsyncWebSocketClient* client) {
 }
 
 void broadcast_all_state_inline() {
-    JsonDocument doc;
+    StaticJsonDocument<512> doc;
     doc["type"] = "state";
     JsonObject data = doc["data"].to<JsonObject>();
-    settings::to_json(data, false);
+    data["mode"] = static_cast<uint8_t>(settings::state().mode);
+    data["brightness"] = settings::state().brightness;
+    data["wifi"]["hostname"] = settings::state().hostname;
+    data["wifi"]["ssid"] = settings::state().wifi_ssid;
+    data["wifi"]["password"] = strlen(settings::state().wifi_password) ? "********" : "";
+    data["wifi"]["tz"] = settings::state().timezone;
 
     String out;
     serializeJson(doc, out);
@@ -254,11 +264,7 @@ void on_ws_event(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType typ
 void register_routes() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         log_i("[http] GET %s", req->url().c_str());
-        if (LittleFS.exists("/index.html")) {
-            serve_littlefs_file(req, "/index.html", "text/html; charset=utf-8");
-            return;
-        }
-        req->send(200, "text/html; charset=utf-8", kFallbackIndexHtml);
+        serve_littlefs_file(req, "/index.html", "text/html; charset=utf-8");
     });
 
     server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -275,9 +281,14 @@ void register_routes() {
 
     // REST endpoints for the web UI (HTTP fallback to WS-driven flow).
     server.on("/api/state", HTTP_GET, [](AsyncWebServerRequest* req) {
-        JsonDocument doc;
+        StaticJsonDocument<512> doc;
         JsonObject root = doc.to<JsonObject>();
-        settings::to_json(root, false);
+        root["mode"] = static_cast<uint8_t>(settings::state().mode);
+        root["brightness"] = settings::state().brightness;
+        root["wifi"]["hostname"] = settings::state().hostname;
+        root["wifi"]["ssid"] = settings::state().wifi_ssid;
+        root["wifi"]["password"] = strlen(settings::state().wifi_password) ? "********" : "";
+        root["wifi"]["tz"] = settings::state().timezone;
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -287,9 +298,14 @@ void register_routes() {
         "/api/state",
         [](AsyncWebServerRequest* req, JsonVariant& json) {
             apply_config_patch(json);
-            JsonDocument doc;
+            StaticJsonDocument<512> doc;
             JsonObject root = doc.to<JsonObject>();
-            settings::to_json(root, false);
+            root["mode"] = static_cast<uint8_t>(settings::state().mode);
+            root["brightness"] = settings::state().brightness;
+            root["wifi"]["hostname"] = settings::state().hostname;
+            root["wifi"]["ssid"] = settings::state().wifi_ssid;
+            root["wifi"]["password"] = strlen(settings::state().wifi_password) ? "********" : "";
+            root["wifi"]["tz"] = settings::state().timezone;
             String out;
             serializeJson(doc, out);
             req->send(200, "application/json", out);
@@ -355,12 +371,18 @@ void begin() {
 
     const wifi_mode_t mode = WiFi.getMode();
     ap_mode = (mode == WIFI_AP || mode == WIFI_AP_STA);
+    if (ap_mode) {
+        log_i("Web server starting in AP mode; captive portal routes enabled");
+    } else {
+        log_i("Web server starting in STA mode; root page available at device IP");
+    }
 
     ws.onEvent(on_ws_event);
     server.addHandler(&ws);
     register_routes();
 
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+    delay(500);
     server.begin();
     log_i("HTTP server started on :80");
 
