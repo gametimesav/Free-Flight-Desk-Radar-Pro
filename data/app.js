@@ -94,6 +94,17 @@
   }
 
   // ── WebSocket plumbing ────────────────────────────────────────────────────
+  async function loadInitialState() {
+    try {
+      const res = await fetch('/api/state');
+      if (!res.ok) return;
+      const msg = await res.json();
+      if (msg) applyState(msg);
+    } catch {
+      // ignore and fall back to websocket if present
+    }
+  }
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/ws`);
@@ -438,5 +449,5 @@
   requestAnimationFrame(drawRadar);
 
   wireInputs();
-  connect();
+  loadInitialState().finally(() => connect());
 })();
