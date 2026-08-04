@@ -1,0 +1,43 @@
+name: Publish OTA firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      - name: Build firmware
+        run: pio run -e esp32dev
+
+      - name: Create release asset
+        run: |
+          mkdir -p release-artifacts
+          cp .pio/build/esp32dev/firmware.bin release-artifacts/firmware.bin
+          cp .pio/build/esp32dev/firmware-combined.bin release-artifacts/firmware-combined.bin
+          printf '%s\n' "${GITHUB_REF_NAME}" > release-artifacts/version.txt
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/firmware.bin
+            release-artifacts/firmware-combined.bin
+            release-artifacts/version.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
